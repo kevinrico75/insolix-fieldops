@@ -1,0 +1,20 @@
+UPGRADING FROM YOUR CURRENT RICO FIELDOPS V2
+
+If you already entered real data in V2:
+
+1. Close the old Rico FieldOps black window.
+2. In the old FieldOps folder, copy the file named: fieldops.db
+3. Extract this new release to a NEW folder.
+4. Paste your old fieldops.db into the new folder and choose Replace.
+5. Run START_WINDOWS.bat.
+
+The new release automatically adds the new tables and fields while keeping the old customers, estimates, jobs and invoices.
+
+If you have uploaded job files/photos in V2, also copy the old "uploads" folder into this new folder before starting.
+
+FIRST LOGIN AFTER UPGRADE
+If the old database did not yet have users, the program will create:
+Email: admin@local
+Password: admin123
+
+After signing in, go to Team & Assets to create permanent users and Settings to change the administrator password.

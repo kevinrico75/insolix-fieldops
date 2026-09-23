@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{% block title %}INSOLIX{% endblock %}</title><link rel="stylesheet" href="/static/styles.css"></head>
+<body>
+<aside class="sidebar">
+  <a class="brandmark" href="/"><img src="/static/insolix-logo.png" alt="INSOLIX Thermal Solutions"></a>
+  <nav>
+    <a href="/">⌂ <span>Dashboard</span></a><a href="/leads">◇ <span>Leads</span></a><a href="/customers">♙ <span>Customers</span></a><a href="/estimates">▤ <span>Estimates</span></a><a href="/jobs">⌂ <span>Jobs</span></a><a href="/schedule">▣ <span>Schedule</span></a><a href="/tasks">✓ <span>Work Orders</span></a><a href="/invoices">▧ <span>Invoices</span></a><a href="/pricebook">▦ <span>Pricebook</span></a><a href="/team">♧ <span>Employees & Assets</span></a><a href="/reports">▥ <span>Reports</span></a><a href="/settings">⚙ <span>Settings</span></a>
+  </nav>
+  <div class="aside-foot"><b>INSOLIX</b><br><small>Thermal Solutions<br>Insulation • Masonry • Stucco • Stone</small></div>
+</aside>
+<main>
+<header class="appbar"><form action="/search" method="get" class="global-search"><input name="q" placeholder="Search customers, estimates, jobs, invoices..."></form><div class="top-actions"><a class="btn dark" href="/estimates">＋ New Estimate</a><a class="btn ghost" href="/leads">＋ Lead</a><form method="post" action="/logout" class="inline"><button class="btn ghost smallbtn">Sign Out</button></form></div></header>
+<div class="pagehead"><div><h1>{% block heading %}Dashboard{% endblock %}</h1><div class="muted">{% block subheading %}{% endblock %}</div></div></div>
+{% block content %}{% endblock %}
+</main>
+{% block scripts %}{% endblock %}
+</body></html>
