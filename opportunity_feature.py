@@ -99,11 +99,20 @@ def init_opportunity_db():
     finally:
         c.close()
 
-def score_opportunity(title, description):
-    text=((title or "")+" "+(description or "")).lower()
+def score_opportunity(title, description, raw=None):
+    raw_text=_flatten_description(raw or {})
+    text=((title or "")+" "+(description or "")+" "+raw_text).lower()
     best_trade=""
     best_score=0
     best_reasons=[]
+    naics_boosts={
+      "238310":("Insulation",55,"NAICS 238310"),
+      "238140":("Masonry",55,"NAICS 238140"),
+      "238390":("Stucco",28,"NAICS 238390"),
+    }
+    for code,(trade,boost,reason) in naics_boosts.items():
+        if code in text and boost>best_score:
+            best_trade,best_score,best_reasons=trade,boost,[reason]
     for trade, terms in TRADE_TERMS.items():
         score=0; reasons=[]
         for term, weight in terms:
@@ -120,7 +129,7 @@ def score_opportunity(title, description):
 def _flatten_description(v):
     if isinstance(v,str): return v
     if isinstance(v,dict):
-        return " ".join(str(x) for x in v.values() if isinstance(x,(str,int,float)))
+        return " ".join(_flatten_description(x) for x in v.values())
     if isinstance(v,list): return " ".join(_flatten_description(x) for x in v)
     return ""
 
@@ -139,7 +148,7 @@ def _location_from_sam(o):
 def upsert_opportunity(c, source_id, source_name, external_id, title, agency="", description="", location="", state="",
                        posted_date="", due_date="", notice_type="", solicitation_number="", url="", contact_name="",
                        contact_email="", contact_phone="", estimated_value=0, raw=None):
-    trade,score,reasons=score_opportunity(title,description)
+    trade,score,reasons=score_opportunity(title,description,raw)
     c.execute("""INSERT INTO opportunities(
         source_id,external_id,source_name,title,agency,description,location,state,posted_date,due_date,
         notice_type,solicitation_number,url,contact_name,contact_email,contact_phone,estimated_value,
@@ -174,7 +183,16 @@ def sync_sam(c, src):
     kept=0
     for o in rows:
         title=o.get("title") or "Untitled opportunity"
-        desc=_flatten_description(o.get("description")) or _flatten_description(o.get("additionalInfoLink"))
+        desc=" ".join(x for x in [
+            _flatten_description(o.get("description")),
+            _flatten_description(o.get("additionalInfo")),
+            _flatten_description(o.get("additionalInfoLink")),
+            _flatten_description(o.get("award")),
+            _flatten_description(o.get("classificationCode")),
+            _flatten_description(o.get("naicsCode")),
+            _flatten_description(o.get("typeOfSetAsideDescription")),
+            _flatten_description(o.get("fullParentPathName"))
+        ] if x)
         loc,state=_location_from_sam(o)
         contacts=o.get("pointOfContact") or []
         contact=contacts[0] if contacts and isinstance(contacts[0],dict) else {}
