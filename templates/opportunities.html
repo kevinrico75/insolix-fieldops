@@ -1,0 +1,71 @@
+{% extends 'base.html' %}
+{% block title %}Opportunity Finder | INSOLIX{% endblock %}
+{% block heading %}Opportunity Finder{% endblock %}
+{% block subheading %}Construction opportunities matched to INSOLIX trades{% endblock %}
+{% block content %}
+<div class="cards kpis">
+  <div class="card metric"><span class="metric-icon blue">◎</span><div><small>Matched Opportunities</small><b>{{counts.total or 0}}</b></div></div>
+  <div class="card metric"><span class="metric-icon green">✓</span><div><small>Strong Matches</small><b>{{counts.strong or 0}}</b></div></div>
+  <div class="card metric"><span class="metric-icon">★</span><div><small>Saved</small><b>{{counts.saved or 0}}</b></div></div>
+  <div class="card metric"><span class="metric-icon red">→</span><div><small>Converted to Leads</small><b>{{counts.converted or 0}}</b></div></div>
+</div>
+
+<div class="grid2">
+<section class="card">
+  <div class="section-title"><h2>Find Work</h2><form method="post" action="/opportunities/sync"><button>Sync Sources Now</button></form></div>
+  <p class="muted">INSOLIX collects current solicitations from configured sources, scores them against your trades, and keeps the strongest matches here.</p>
+  {% if request.query_params.get('sync') %}<div class="notice success">Sync complete: {{request.query_params.get('total')}} opportunities checked, {{request.query_params.get('matched')}} matched your trades.</div>{% endif %}
+  {% if not sam_configured %}<div class="notice">Federal SAM.gov connector is installed but needs a <b>SAM_GOV_API_KEY</b> Railway variable before it can pull federal opportunities.</div>{% endif %}
+  <form method="get" action="/opportunities">
+    <div class="row">
+      <label>Search<input name="q" value="{{q}}" placeholder="school, apartment, CMU, insulation..."></label>
+      <label>Trade<select name="trade"><option value="">All trades</option>{% for t in trade_counts %}<option value="{{t.trade}}" {% if trade==t.trade %}selected{% endif %}>{{t.trade}} ({{t.n}})</option>{% endfor %}</select></label>
+      <label>Minimum Match<select name="min_score">{% for n in [18,30,45,55,70] %}<option value="{{n}}" {% if min_score==n %}selected{% endif %}>{{n}}%</option>{% endfor %}</select></label>
+      <label>Status<select name="status"><option value="">All</option>{% for s in ['New','Saved','Passed','Converted'] %}<option {% if status==s %}selected{% endif %}>{{s}}</option>{% endfor %}</select></label>
+    </div>
+    <button class="secondary">Apply Filters</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Sources</h2>
+  {% for s in sources %}
+  <div class="workorder"><div><b>{{s.name}}</b><small>{{s.source_type|upper}} • {{s.last_sync or 'Not synced yet'}}</small></div><p>{{s.last_status or 'Ready'}}</p></div>
+  {% endfor %}
+  <details><summary><b>Add RSS / Atom procurement feed</b></summary>
+    <form method="post" action="/opportunities/sources">
+      <label>Source Name<input name="name" required placeholder="City procurement feed"></label>
+      <input type="hidden" name="source_type" value="rss">
+      <label>Feed URL<input name="url" type="url" required placeholder="https://..."></label>
+      <button>Add Source</button>
+    </form>
+  </details>
+</section>
+</div>
+
+<section class="card">
+<div class="section-title"><h2>Matched Projects</h2><span class="muted">Highest-value trade matches first</span></div>
+<div class="table-wrap">
+<table>
+<tr><th>Match</th><th>Project</th><th>Trade</th><th>Agency / Location</th><th>Due</th><th>Status</th><th>Action</th></tr>
+{% for o in opportunities %}
+<tr>
+  <td><b>{{o.match_score}}%</b><br><small>{{o.match_reasons or 'construction match'}}</small></td>
+  <td><b>{% if o.url %}<a href="{{o.url}}" target="_blank" rel="noopener">{{o.title}}</a>{% else %}{{o.title}}{% endif %}</b><br><small>{{o.solicitation_number or o.notice_type or o.source_name}}</small></td>
+  <td><span class="status">{{o.trade or 'Review'}}</span></td>
+  <td>{{o.agency or '—'}}<br><small>{{o.location or o.state or '—'}}</small></td>
+  <td>{{o.due_date or '—'}}</td>
+  <td>
+    <form method="post" action="/opportunities/{{o.id}}/status" class="inline">
+      <select name="status" onchange="this.form.submit()">{% for s in ['New','Saved','Passed','Converted'] %}<option {% if o.status==s %}selected{% endif %}>{{s}}</option>{% endfor %}</select>
+    </form>
+  </td>
+  <td>{% if o.status!='Converted' %}<form method="post" action="/opportunities/{{o.id}}/convert"><button class="smallbtn">Create Lead</button></form>{% else %}<span class="muted">In Leads</span>{% endif %}</td>
+</tr>
+{% else %}
+<tr><td colspan="7" class="empty">No matched opportunities yet. Configure a source and click Sync Sources Now.</td></tr>
+{% endfor %}
+</table>
+</div>
+</section>
+{% endblock %}
