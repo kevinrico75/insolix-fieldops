@@ -106,9 +106,9 @@ def score_opportunity(title, description, raw=None):
     best_score=0
     best_reasons=[]
     naics_boosts={
-      "238310":("Insulation",55,"NAICS 238310"),
-      "238140":("Masonry",55,"NAICS 238140"),
-      "238390":("Stucco",28,"NAICS 238390"),
+      "238310":("Insulation",72,"NAICS 238310 insulation/drywall"),
+      "238140":("Masonry",72,"NAICS 238140 masonry"),
+      "238390":("Stucco",55,"NAICS 238390 specialty building finish"),
     }
     for code,(trade,boost,reason) in naics_boosts.items():
         if code in text and boost>best_score:
@@ -124,14 +124,27 @@ def score_opportunity(title, description, raw=None):
         score=min(score,100)
         if score>best_score:
             best_trade,best_score,best_reasons=trade,score,reasons
+
+    # SAM prime-contract notices often identify only the overall construction project.
+    # Keep those visible for review because insulation/masonry scopes may live in plans/specs.
+    broad_construction_codes=("236115","236116","236117","236118","236210","236220")
+    broad_terms=("construction","renovation","building renovation","facility renovation","repair building",
+                 "remodel","addition","design build","design-build","new building")
+    if best_score < 18 and (any(code in text for code in broad_construction_codes) or
+                            any(term in text for term in broad_terms)):
+        best_trade="Construction Review"
+        best_score=20
+        best_reasons=["prime construction project - review plans/specs for INSOLIX scope"]
     return best_trade,best_score,", ".join(best_reasons[:5])
 
 def _flatten_description(v):
-    if isinstance(v,str): return v
+    if v is None: return ""
+    if isinstance(v,(str,int,float,bool)): return str(v)
     if isinstance(v,dict):
         return " ".join(_flatten_description(x) for x in v.values())
-    if isinstance(v,list): return " ".join(_flatten_description(x) for x in v)
-    return ""
+    if isinstance(v,list):
+        return " ".join(_flatten_description(x) for x in v)
+    return str(v)
 
 def _location_from_sam(o):
     pop=o.get("placeOfPerformance") or {}
