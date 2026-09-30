@@ -1,0 +1,28 @@
+{% extends 'base.html' %}
+{% block title %}Scope Analysis | INSOLIX{% endblock %}
+{% block heading %}Scope Analysis{% endblock %}
+{% block subheading %}Confirm INSOLIX work before pursuing the opportunity{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="section-title"><div><h2>{{o.title}}</h2><p class="muted">{{o.agency or ''}}{% if o.location %} • {{o.location}}{% endif %}</p></div><a href="/opportunities">Back to Opportunity Finder</a></div>
+  <div class="cards kpis">
+    <div class="card metric"><div><small>Initial Match</small><b>{{o.match_score}}%</b></div></div>
+    <div class="card metric"><div><small>Scope Review</small><b>{{analysis.review_status if analysis else 'Not Reviewed'}}</b></div></div>
+    <div class="card metric"><div><small>Scope Confidence</small><b>{{(analysis.confidence|string + '%') if analysis else '—'}}</b></div></div>
+  </div>
+  {% if analysis %}
+  <h3>Confirmed Scope</h3><p><b>{{analysis.confirmed_trade or 'No explicit INSOLIX scope found'}}</b></p>
+  <p><b>CSI divisions:</b> {{analysis.csi_divisions or '—'}}</p>
+  <p><b>Evidence:</b> {{analysis.evidence}}</p>
+  {% endif %}
+</section>
+<section class="card">
+  <h2>Analyze Bid Documents</h2>
+  <p class="muted">Paste extracted specification, scope, addendum, or plan-note text here. INSOLIX checks Division 04 masonry and Division 07 insulation, spray foam, firestopping and air-barrier scope, plus stucco and stone veneer.</p>
+  <form method="post" action="/opportunities/{{o.id}}/scope/analyze">
+    <label>Bid document / specification text<textarea name="document_text" rows="14" placeholder="Paste relevant specification or scope text here..."></textarea></label>
+    <button>Analyze Scope</button>
+  </form>
+  {% if o.url %}<p><a href="{{o.url}}" target="_blank" rel="noopener">Open source solicitation</a></p>{% endif %}
+</section>
+{% endblock %}
