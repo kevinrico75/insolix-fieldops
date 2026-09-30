@@ -1,10 +1,11 @@
-from fastapi import Request, Form
+from fastapi import Request, Form, Header, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 import sqlite3, os, json, urllib.request, urllib.parse, urllib.error, xml.etree.ElementTree as ET, io, re, socket, ipaddress
 from html.parser import HTMLParser
 from pypdf import PdfReader
 from datetime import date, datetime, timedelta
+import hashlib, hmac
 
 BASE = os.path.dirname(__file__)
 DATA_DIR = os.environ.get("INSOLIX_DATA_DIR", BASE)
@@ -92,6 +93,22 @@ def init_opportunity_db():
         CREATE INDEX IF NOT EXISTS idx_opp_score ON opportunities(match_score DESC);
         CREATE INDEX IF NOT EXISTS idx_opp_due ON opportunities(due_date);
         CREATE INDEX IF NOT EXISTS idx_opp_trade ON opportunities(trade);
+        CREATE TABLE IF NOT EXISTS procurement_alerts(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          provider TEXT NOT NULL,
+          external_id TEXT NOT NULL,
+          sender TEXT,
+          subject TEXT,
+          body TEXT,
+          received_at TEXT,
+          solicitation_number TEXT,
+          buying_organization TEXT,
+          closing_date TEXT,
+          solicitation_url TEXT,
+          opportunity_id INTEGER,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(provider, external_id)
+        );
         CREATE TABLE IF NOT EXISTS opportunity_scope_analysis(
           opportunity_id INTEGER PRIMARY KEY,
           review_status TEXT DEFAULT 'Not Reviewed',
@@ -318,6 +335,52 @@ def sync_sam(c, src):
         if score>=18: kept+=1
     return len(rows),kept
 
+
+def _email_field(body,label):
+    m=re.search(r'(?im)^\s*'+re.escape(label)+r'\s*:\s*(?:\n\s*)?([^\n]+)',body or '')
+    return m.group(1).strip() if m else ""
+
+def normalize_bidnet_alert(sender,subject,body,received_at="",provider="",external_id=""):
+    text=body or ""
+    if not provider:
+        provider="BidNet" if "bidnet" in (sender or "").lower() else "procurement-email"
+    number=_email_field(text,"Solicitation Number")
+    title=_email_field(text,"Solicitation Title") or (subject or "").strip() or "Untitled BidNet opportunity"
+    org=_email_field(text,"Buying Organization")
+    desc=_email_field(text,"Description")
+    closing=_email_field(text,"Closing date") or _email_field(text,"Closing Date")
+    links=re.findall(r'https?://[^\s)<>]+',text)
+    md=re.search(r'\[Link to Solicitation Page\]\((https?://[^)]+)\)',text,re.I)
+    url=md.group(1) if md else (links[0] if links else "")
+    ext=external_id or number or hashlib.sha256(((subject or "")+"|"+(received_at or "")+"|"+text[:1000]).encode()).hexdigest()[:32]
+    return {"provider":provider,"external_id":ext,"sender":sender or "","subject":subject or "","body":text,
+            "received_at":received_at or "","solicitation_number":number,"title":title,
+            "buying_organization":org,"description":desc,"closing_date":closing,"solicitation_url":url}
+
+def ingest_bidnet_alert(payload):
+    a=normalize_bidnet_alert(payload.get("sender",""),payload.get("subject",""),payload.get("body",""),
+                             payload.get("received_at",""),payload.get("provider",""),payload.get("external_id",""))
+    c=_conn()
+    try:
+        c.execute("""INSERT OR IGNORE INTO procurement_alerts(provider,external_id,sender,subject,body,received_at,
+                     solicitation_number,buying_organization,closing_date,solicitation_url)
+                     VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                  (a["provider"],a["external_id"],a["sender"],a["subject"],a["body"],a["received_at"],
+                   a["solicitation_number"],a["buying_organization"],a["closing_date"],a["solicitation_url"]))
+        score=upsert_opportunity(c,None,a["provider"],a["external_id"],a["title"],a["buying_organization"],
+                                 " ".join([a["description"],a["body"]]),posted_date=a["received_at"],
+                                 due_date=a["closing_date"],solicitation_number=a["solicitation_number"],
+                                 url=a["solicitation_url"],raw={"provider":a["provider"],"sender":a["sender"],
+                                 "subject":a["subject"],"body":a["body"]})
+        o=c.execute("SELECT id,trade,match_score FROM opportunities WHERE source_name=? AND external_id=?",
+                    (a["provider"],a["external_id"])).fetchone()
+        if o:
+            c.execute("UPDATE procurement_alerts SET opportunity_id=? WHERE provider=? AND external_id=?",
+                      (o["id"],a["provider"],a["external_id"]))
+        c.commit()
+        return {"opportunity_id":o["id"] if o else None,"trade":o["trade"] if o else "","match_score":score}
+    finally: c.close()
+
 def _rss_text(node, names):
     for n in names:
         x=node.find(n)
@@ -453,6 +516,15 @@ def install(app):
           "trade":trade,"status":status,"min_score":min_score,"q":q,"include_review":include_review,
           "sam_configured":bool(os.getenv("SAM_GOV_API_KEY"))
         })
+
+    @app.post("/api/procurement-alert")
+    async def procurement_alert_api(request:Request, x_insolix_ingest_token:str=Header(default="")):
+        expected=os.getenv("INSOLIX_INGEST_TOKEN","").strip()
+        if not expected or not hmac.compare_digest(x_insolix_ingest_token or "",expected):
+            raise HTTPException(status_code=401,detail="unauthorized")
+        payload=await request.json()
+        result=ingest_bidnet_alert(payload)
+        return {"ok":True,**result}
 
     @app.post("/opportunities/sync")
     def opportunities_sync():
