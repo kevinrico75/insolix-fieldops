@@ -17,8 +17,10 @@
   {% endif %}
 </section>
 <section class="card">
-  <h2>Analyze Bid Documents</h2>
-  <p class="muted">Paste extracted specification, scope, addendum, or plan-note text here. INSOLIX checks Division 04 masonry and Division 07 insulation, spray foam, firestopping and air-barrier scope, plus stucco and stone veneer.</p>
+  <div class="section-title"><div><h2>Analyze Bid Documents</h2><p class="muted">INSOLIX can automatically inspect public document links found in the solicitation.</p></div>
+  <form method="post" action="/opportunities/{{o.id}}/scope/auto"><button>Auto Analyze Public Documents</button></form></div>
+  {% if analysis and analysis.document_url %}<p><a href="{{analysis.document_url}}" target="_blank" rel="noopener">Open analyzed document</a></p>{% endif %}
+  <p class="muted">Automatic analysis checks accessible PDF/HTML/text documents. You can also paste specification, scope, addendum, or plan-note text manually. INSOLIX checks Division 04 masonry and Division 07 insulation, spray foam, firestopping and air-barrier scope, plus stucco and stone veneer.</p>
   <form method="post" action="/opportunities/{{o.id}}/scope/analyze">
     <label>Bid document / specification text<textarea name="document_text" rows="14" placeholder="Paste relevant specification or scope text here..."></textarea></label>
     <button>Analyze Scope</button>
