@@ -4,8 +4,9 @@
 {% block subheading %}Construction opportunities matched to INSOLIX trades{% endblock %}
 {% block content %}
 <div class="cards kpis">
-  <div class="card metric"><span class="metric-icon blue">◎</span><div><small>Matched Opportunities</small><b>{{counts.total or 0}}</b></div></div>
-  <div class="card metric"><span class="metric-icon green">✓</span><div><small>Strong Matches</small><b>{{counts.strong or 0}}</b></div></div>
+  <div class="card metric"><span class="metric-icon blue">◎</span><div><small>Trade Matches</small><b>{{counts.total or 0}}</b></div></div>
+  <div class="card metric"><span class="metric-icon green">✓</span><div><small>Strong Trade Matches</small><b>{{counts.strong or 0}}</b></div></div>
+  <div class="card metric"><span class="metric-icon blue">?</span><div><small>Needs Plan Review</small><b>{{counts.review or 0}}</b></div></div>
   <div class="card metric"><span class="metric-icon">★</span><div><small>Saved</small><b>{{counts.saved or 0}}</b></div></div>
   <div class="card metric"><span class="metric-icon red">→</span><div><small>Converted to Leads</small><b>{{counts.converted or 0}}</b></div></div>
 </div>
@@ -22,6 +23,7 @@
       <label>Trade<select name="trade"><option value="">All trades</option>{% for t in trade_counts %}<option value="{{t.trade}}" {% if trade==t.trade %}selected{% endif %}>{{t.trade}} ({{t.n}})</option>{% endfor %}</select></label>
       <label>Minimum Match<select name="min_score">{% for n in [18,30,45,55,70] %}<option value="{{n}}" {% if min_score==n %}selected{% endif %}>{{n}}%</option>{% endfor %}</select></label>
       <label>Status<select name="status"><option value="">All</option>{% for s in ['New','Saved','Passed','Converted'] %}<option {% if status==s %}selected{% endif %}>{{s}}</option>{% endfor %}</select></label>
+      <label>General Construction Review<select name="include_review"><option value="0" {% if not include_review %}selected{% endif %}>Hide</option><option value="1" {% if include_review %}selected{% endif %}>Show</option></select></label>
     </div>
     <button class="secondary">Apply Filters</button>
   </form>
@@ -44,7 +46,7 @@
 </div>
 
 <section class="card">
-<div class="section-title"><h2>Matched Projects</h2><span class="muted">Highest-value trade matches first</span></div>
+<div class="section-title"><h2>Trade Matches</h2><span class="muted">Default view shows only records with an actual INSOLIX trade signal. General construction projects are hidden unless you choose Show.</span></div>
 <div class="table-wrap">
 <table>
 <tr><th>Match</th><th>Project</th><th>Trade</th><th>Agency / Location</th><th>Due</th><th>Status</th><th>Action</th></tr>
@@ -52,7 +54,7 @@
 <tr>
   <td><b>{{o.match_score}}%</b><br><small>{{o.match_reasons or 'construction match'}}</small></td>
   <td><b>{% if o.url %}<a href="{{o.url}}" target="_blank" rel="noopener">{{o.title}}</a>{% else %}{{o.title}}{% endif %}</b><br><small>{{o.solicitation_number or o.notice_type or o.source_name}}</small></td>
-  <td><span class="status">{{o.trade or 'Review'}}</span></td>
+  <td><span class="status">{{o.trade or 'Review'}}</span><br><small>{% if o.trade=='Construction Review' %}Possible scope only — plans/specs must be checked{% elif 'NAICS' in (o.match_reasons or '') %}Trade-category signal{% else %}Trade wording found in record{% endif %}</small></td>
   <td>{{o.agency or '—'}}<br><small>{{o.location or o.state or '—'}}</small></td>
   <td>{{o.due_date or '—'}}</td>
   <td>
