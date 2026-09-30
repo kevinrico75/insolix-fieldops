@@ -337,7 +337,7 @@ def user_for_request(request):
 
 @app.middleware('http')
 async def auth_guard(request: Request, call_next):
-    public = request.url.path.startswith('/static') or request.url.path.startswith('/documents/') or request.url.path.startswith('/proposal/') or request.url.path in ['/login','/health','/quickbooks/callback']
+    public = request.url.path.startswith('/static') or request.url.path.startswith('/documents/') or request.url.path.startswith('/proposal/') or request.url.path in ['/login','/health','/quickbooks/callback','/api/procurement-alert']
     u=user_for_request(request)
     request.state.user=u
     if not public and not u:
