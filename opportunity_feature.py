@@ -284,11 +284,13 @@ def install(app):
     init_opportunity_db()
 
     @app.get("/opportunities", response_class=HTMLResponse)
-    def opportunities_page(request:Request, trade:str="", status:str="", min_score:int=18, q:str=""):
+    def opportunities_page(request:Request, trade:str="", status:str="", min_score:int=18, q:str="", include_review:int=0):
         c=_conn()
         try:
             sql="SELECT * FROM opportunities WHERE match_score>=?"
             args=[min_score]
+            if not include_review:
+                sql+=" AND trade!='Construction Review'"
             if trade:
                 sql+=" AND trade=?"; args.append(trade)
             if status:
@@ -299,17 +301,19 @@ def install(app):
             sql+=" ORDER BY CASE WHEN due_date IS NULL OR due_date='' THEN 1 ELSE 0 END,due_date,match_score DESC,id DESC LIMIT 500"
             rows=c.execute(sql,args).fetchall()
             counts=c.execute("""SELECT
-              COUNT(*) total,
-              SUM(CASE WHEN match_score>=55 THEN 1 ELSE 0 END) strong,
-              SUM(CASE WHEN status='Saved' THEN 1 ELSE 0 END) saved,
-              SUM(CASE WHEN status='Converted' THEN 1 ELSE 0 END) converted
-              FROM opportunities WHERE match_score>=18""").fetchone()
+              SUM(CASE WHEN match_score>=18 AND trade!='Construction Review' THEN 1 ELSE 0 END) total,
+              SUM(CASE WHEN match_score>=55 AND trade!='Construction Review' THEN 1 ELSE 0 END) strong,
+              SUM(CASE WHEN trade='Construction Review' AND match_score>=18 THEN 1 ELSE 0 END) review,
+              SUM(CASE WHEN status='Saved' AND trade!='Construction Review' THEN 1 ELSE 0 END) saved,
+              SUM(CASE WHEN status='Converted' AND trade!='Construction Review' THEN 1 ELSE 0 END) converted
+              FROM opportunities""").fetchone()
             sources=c.execute("SELECT * FROM opportunity_sources ORDER BY id").fetchall()
-            trade_counts=c.execute("SELECT trade,COUNT(*) n FROM opportunities WHERE match_score>=18 GROUP BY trade ORDER BY n DESC").fetchall()
+            trade_counts=c.execute("SELECT trade,COUNT(*) n FROM opportunities WHERE match_score>=18 AND trade!='Construction Review' GROUP BY trade ORDER BY n DESC").fetchall()
         finally: c.close()
         return templates.TemplateResponse("opportunities.html",{
           "request":request,"opportunities":rows,"counts":counts,"sources":sources,"trade_counts":trade_counts,
-          "trade":trade,"status":status,"min_score":min_score,"q":q,"sam_configured":bool(os.getenv("SAM_GOV_API_KEY"))
+          "trade":trade,"status":status,"min_score":min_score,"q":q,"include_review":include_review,
+          "sam_configured":bool(os.getenv("SAM_GOV_API_KEY"))
         })
 
     @app.post("/opportunities/sync")
