@@ -90,6 +90,17 @@ def init_opportunity_db():
         CREATE INDEX IF NOT EXISTS idx_opp_score ON opportunities(match_score DESC);
         CREATE INDEX IF NOT EXISTS idx_opp_due ON opportunities(due_date);
         CREATE INDEX IF NOT EXISTS idx_opp_trade ON opportunities(trade);
+        CREATE TABLE IF NOT EXISTS opportunity_scope_analysis(
+          opportunity_id INTEGER PRIMARY KEY,
+          review_status TEXT DEFAULT 'Not Reviewed',
+          confirmed_trade TEXT,
+          csi_divisions TEXT,
+          confidence INTEGER DEFAULT 0,
+          evidence TEXT,
+          document_url TEXT,
+          reviewed_at TEXT,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         """)
         if not c.execute("SELECT id FROM opportunity_sources WHERE source_type='sam' LIMIT 1").fetchone():
             c.execute("INSERT INTO opportunity_sources(name,source_type,url,enabled,last_status) VALUES (?,?,?,?,?)",
@@ -145,6 +156,28 @@ def _flatten_description(v):
     if isinstance(v,list):
         return " ".join(_flatten_description(x) for x in v)
     return str(v)
+
+def analyze_scope_text(text):
+    text=(text or "").lower()
+    scopes={
+      "Masonry / Division 04": ["division 04","04 20 00","unit masonry","concrete masonry","cmu","brick veneer","stone masonry","masonry"],
+      "Insulation / Division 07": ["division 07","07 21 00","thermal insulation","batt insulation","fiberglass insulation","loose-fill insulation","blown insulation"],
+      "Spray Foam / Division 07": ["07 21 19","spray polyurethane foam","spray foam","closed-cell foam","open-cell foam"],
+      "Firestopping / Division 07": ["07 84 00","firestopping","firestop","penetration firestop"],
+      "Air Barriers / Division 07": ["07 27 00","air barrier","air sealing","air seal"],
+      "Stucco / Plaster": ["09 24 00","stucco","portland cement plaster","exterior plaster"],
+      "Stone Veneer": ["04 42 00","stone veneer","natural stone","manufactured stone","cultured stone"]
+    }
+    hits=[]
+    for scope,terms in scopes.items():
+        found=[term for term in terms if term in text]
+        if found: hits.append((scope,found[:5]))
+    if not hits:
+        return "", "", 0, "No explicit INSOLIX trade scope found in analyzed text."
+    divisions=sorted(set("04" if "Division 04" in s or "Stone" in s else "07" if "Division 07" in s or "Fire" in s or "Air" in s else "09" for s,_ in hits))
+    evidence="; ".join(scope+": "+", ".join(found) for scope,found in hits)
+    confidence=min(98,60+8*sum(len(x[1]) for x in hits))
+    return ", ".join(x[0] for x in hits), ", ".join(divisions), confidence, evidence
 
 def _location_from_sam(o):
     pop=o.get("placeOfPerformance") or {}
@@ -334,6 +367,35 @@ def install(app):
             c.commit()
         finally: c.close()
         return RedirectResponse("/opportunities",303)
+
+    @app.get("/opportunities/{opp_id}/scope", response_class=HTMLResponse)
+    def opportunity_scope_page(request:Request,opp_id:int):
+        c=_conn()
+        try:
+            o=c.execute("SELECT * FROM opportunities WHERE id=?",(opp_id,)).fetchone()
+            if not o: return RedirectResponse("/opportunities",303)
+            a=c.execute("SELECT * FROM opportunity_scope_analysis WHERE opportunity_id=?",(opp_id,)).fetchone()
+        finally: c.close()
+        return templates.TemplateResponse("opportunity_scope.html",{"request":request,"o":o,"analysis":a})
+
+    @app.post("/opportunities/{opp_id}/scope/analyze")
+    def opportunity_scope_analyze(opp_id:int,document_text:str=Form("")):
+        c=_conn()
+        try:
+            o=c.execute("SELECT * FROM opportunities WHERE id=?",(opp_id,)).fetchone()
+            if not o: return RedirectResponse("/opportunities",303)
+            base=" ".join([o["title"] or "",o["description"] or "",document_text or ""])
+            trade,divisions,confidence,evidence=analyze_scope_text(base)
+            review_status="Scope Found" if trade else "No Scope Found"
+            c.execute("""INSERT INTO opportunity_scope_analysis(opportunity_id,review_status,confirmed_trade,csi_divisions,confidence,evidence,reviewed_at,updated_at)
+                         VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+                         ON CONFLICT(opportunity_id) DO UPDATE SET review_status=excluded.review_status,confirmed_trade=excluded.confirmed_trade,
+                         csi_divisions=excluded.csi_divisions,confidence=excluded.confidence,evidence=excluded.evidence,
+                         reviewed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP""",
+                      (opp_id,review_status,trade,divisions,confidence,evidence))
+            c.commit()
+        finally: c.close()
+        return RedirectResponse(f"/opportunities/{opp_id}/scope",303)
 
     @app.post("/opportunities/{opp_id}/status")
     def opportunity_status(opp_id:int,status:str=Form(...)):
