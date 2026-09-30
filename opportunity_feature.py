@@ -190,7 +190,7 @@ def _collect_urls(v, out=None):
     elif isinstance(v,list):
         for x in v: _collect_urls(x,out)
     elif isinstance(v,str):
-        for u in re.findall(r'https?://[^\\s"\'<>]+',v):
+        for u in re.findall(r'https?://[^\s"\'<>]+',v):
             u=u.rstrip(".,);]")
             if _public_http_url(u) and u not in out: out.append(u)
     return out
