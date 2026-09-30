@@ -13,9 +13,13 @@
 
 <div class="grid2">
 <section class="card">
-  <div class="section-title"><h2>Find Work</h2><form method="post" action="/opportunities/sync"><button>Sync Sources Now</button></form></div>
+  <div class="section-title"><h2>Find Work</h2><div style="display:flex;gap:8px;flex-wrap:wrap">
+    <form method="post" action="/opportunities/sync"><button>Sync Sources Now</button></form>
+    <form method="post" action="/opportunities/scope/auto-batch"><input type="hidden" name="limit" value="8"><button class="secondary">Auto Analyze Top 8</button></form>
+  </div></div>
   <p class="muted">INSOLIX collects current solicitations from configured sources, scores them against your trades, and keeps the strongest matches here.</p>
   {% if request.query_params.get('sync') %}<div class="notice success">Sync complete: {{request.query_params.get('total')}} opportunities checked, {{request.query_params.get('matched')}} matched your trades.</div>{% endif %}
+  {% if request.query_params.get('batch') %}<div class="notice success">Scope scan complete: {{request.query_params.get('reviewed')}} opportunities analyzed, {{request.query_params.get('scope_found')}} with INSOLIX scope signals.</div>{% endif %}
   {% if not sam_configured %}<div class="notice">Federal SAM.gov connector is installed but needs a <b>SAM_GOV_API_KEY</b> Railway variable before it can pull federal opportunities.</div>{% endif %}
   <form method="get" action="/opportunities">
     <div class="row">
