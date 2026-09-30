@@ -1,7 +1,9 @@
 from fastapi import Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-import sqlite3, os, json, urllib.request, urllib.parse, urllib.error, xml.etree.ElementTree as ET
+import sqlite3, os, json, urllib.request, urllib.parse, urllib.error, xml.etree.ElementTree as ET, io, re, socket, ipaddress
+from html.parser import HTMLParser
+from pypdf import PdfReader
 from datetime import date, datetime, timedelta
 
 BASE = os.path.dirname(__file__)
@@ -156,6 +158,69 @@ def _flatten_description(v):
     if isinstance(v,list):
         return " ".join(_flatten_description(x) for x in v)
     return str(v)
+
+class _TextHTMLParser(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.parts=[]
+    def handle_data(self,data):
+        if data and data.strip(): self.parts.append(data.strip())
+
+def _public_http_url(url):
+    try:
+        p=urllib.parse.urlparse(url)
+        if p.scheme not in ("http","https") or not p.hostname: return False
+        host=p.hostname.lower()
+        if host in ("localhost","localhost.localdomain"): return False
+        try:
+            infos=socket.getaddrinfo(host,None)
+            for info in infos:
+                ip=ipaddress.ip_address(info[4][0])
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                    return False
+        except Exception:
+            return False
+        return True
+    except Exception:
+        return False
+
+def _collect_urls(v, out=None):
+    out=out if out is not None else []
+    if isinstance(v,dict):
+        for x in v.values(): _collect_urls(x,out)
+    elif isinstance(v,list):
+        for x in v: _collect_urls(x,out)
+    elif isinstance(v,str):
+        for u in re.findall(r'https?://[^\\s"\'<>]+',v):
+            u=u.rstrip(".,);]")
+            if _public_http_url(u) and u not in out: out.append(u)
+    return out
+
+def _fetch_document_text(url,max_bytes=12000000):
+    if not _public_http_url(url): return "", "blocked"
+    req=urllib.request.Request(url,headers={"User-Agent":"INSOLIX-OpportunityFinder/1.0","Accept":"application/pdf,text/plain,text/html,application/octet-stream,*/*"})
+    with urllib.request.urlopen(req,timeout=20) as r:
+        ctype=(r.headers.get("Content-Type") or "").lower()
+        clen=r.headers.get("Content-Length")
+        if clen and int(clen)>max_bytes: return "", "too_large"
+        data=r.read(max_bytes+1)
+        if len(data)>max_bytes: return "", "too_large"
+    if "pdf" in ctype or url.lower().split("?")[0].endswith(".pdf"):
+        try:
+            reader=PdfReader(io.BytesIO(data))
+            text="\n".join((page.extract_text() or "") for page in reader.pages[:250])
+            return text[:1500000], "pdf"
+        except Exception:
+            return "", "pdf_unreadable"
+    if "html" in ctype:
+        try:
+            p=_TextHTMLParser(); p.feed(data.decode("utf-8","replace"))
+            return "\n".join(p.parts)[:1500000], "html"
+        except Exception:
+            return "", "html_unreadable"
+    try:
+        return data.decode("utf-8","replace")[:1500000], "text"
+    except Exception:
+        return "", "unreadable"
 
 def analyze_scope_text(text):
     text=(text or "").lower()
@@ -377,6 +442,57 @@ def install(app):
             a=c.execute("SELECT * FROM opportunity_scope_analysis WHERE opportunity_id=?",(opp_id,)).fetchone()
         finally: c.close()
         return templates.TemplateResponse("opportunity_scope.html",{"request":request,"o":o,"analysis":a})
+
+    @app.post("/opportunities/{opp_id}/scope/auto")
+    def opportunity_scope_auto(opp_id:int):
+        c=_conn()
+        try:
+            o=c.execute("SELECT * FROM opportunities WHERE id=?",(opp_id,)).fetchone()
+            if not o: return RedirectResponse("/opportunities",303)
+            try: raw=json.loads(o["raw_json"] or "{}")
+            except Exception: raw={}
+            urls=_collect_urls(raw)
+            # Prefer likely bid documents/resources, but retain a few general source links.
+            def rank(u):
+                low=u.lower()
+                score=0
+                for token in (".pdf","attachment","document","solicitation","spec","drawing","plans","package","resource"): 
+                    if token in low: score+=2
+                if "sam.gov" in low: score+=1
+                return score
+            urls=sorted(urls,key=rank,reverse=True)[:12]
+            texts=[]; inspected=[]; failures=[]
+            for u in urls:
+                try:
+                    txt,kind=_fetch_document_text(u)
+                    if txt and len(txt.strip())>40:
+                        texts.append(txt)
+                        inspected.append(u)
+                    else:
+                        failures.append(kind)
+                except Exception as e:
+                    failures.append(type(e).__name__)
+            base=" ".join([o["title"] or "",o["description"] or ""]+texts)
+            trade,divisions,confidence,evidence=analyze_scope_text(base)
+            if trade and texts: review_status="Scope Found in Retrieved Documents"
+            elif trade: review_status="Scope Found in Notice"
+            elif texts: review_status="Documents Checked - No Scope Found"
+            elif urls: review_status="Document Retrieval Failed"
+            else: review_status="No Public Bid Documents Found"
+            detail=evidence
+            if inspected:
+                detail += " | Documents analyzed: "+str(len(inspected))
+            elif failures:
+                detail += " | Retrieval attempts failed/unreadable: "+str(len(failures))
+            c.execute("""INSERT INTO opportunity_scope_analysis(opportunity_id,review_status,confirmed_trade,csi_divisions,confidence,evidence,document_url,reviewed_at,updated_at)
+                         VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+                         ON CONFLICT(opportunity_id) DO UPDATE SET review_status=excluded.review_status,confirmed_trade=excluded.confirmed_trade,
+                         csi_divisions=excluded.csi_divisions,confidence=excluded.confidence,evidence=excluded.evidence,document_url=excluded.document_url,
+                         reviewed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP""",
+                      (opp_id,review_status,trade,divisions,confidence,detail,inspected[0] if inspected else ""))
+            c.commit()
+        finally: c.close()
+        return RedirectResponse(f"/opportunities/{opp_id}/scope",303)
 
     @app.post("/opportunities/{opp_id}/scope/analyze")
     def opportunity_scope_analyze(opp_id:int,document_text:str=Form("")):
