@@ -378,6 +378,46 @@ def sync_sources():
     finally:
         c.close()
 
+
+def _auto_scope_for_row(c,o):
+    try: raw=json.loads(o["raw_json"] or "{}")
+    except Exception: raw={}
+    urls=_collect_urls(raw)
+    def rank(u):
+        low=u.lower(); score=0
+        for token in (".pdf","attachment","document","solicitation","spec","drawing","plans","package","resource"):
+            if token in low: score+=2
+        if "sam.gov" in low: score+=1
+        return score
+    urls=sorted(urls,key=rank,reverse=True)[:12]
+    texts=[]; inspected=[]; failures=[]
+    for u in urls:
+        try:
+            txt,kind=_fetch_document_text(u)
+            if txt and len(txt.strip())>40:
+                texts.append(txt); inspected.append(u)
+            else:
+                failures.append(kind)
+        except Exception as e:
+            failures.append(type(e).__name__)
+    base=" ".join([o["title"] or "",o["description"] or ""]+texts)
+    trade,divisions,confidence,evidence=analyze_scope_text(base)
+    if trade and texts: review_status="Scope Found in Retrieved Documents"
+    elif trade: review_status="Scope Found in Notice"
+    elif texts: review_status="Documents Checked - No Scope Found"
+    elif urls: review_status="Document Retrieval Failed"
+    else: review_status="No Public Bid Documents Found"
+    detail=evidence
+    if inspected: detail += " | Documents analyzed: "+str(len(inspected))
+    elif failures: detail += " | Retrieval attempts failed/unreadable: "+str(len(failures))
+    c.execute("""INSERT INTO opportunity_scope_analysis(opportunity_id,review_status,confirmed_trade,csi_divisions,confidence,evidence,document_url,reviewed_at,updated_at)
+                 VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+                 ON CONFLICT(opportunity_id) DO UPDATE SET review_status=excluded.review_status,confirmed_trade=excluded.confirmed_trade,
+                 csi_divisions=excluded.csi_divisions,confidence=excluded.confidence,evidence=excluded.evidence,document_url=excluded.document_url,
+                 reviewed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP""",
+              (o["id"],review_status,trade,divisions,confidence,detail,inspected[0] if inspected else ""))
+    return {"status":review_status,"trade":trade,"confidence":confidence,"documents":len(inspected)}
+
 def install(app):
     init_opportunity_db()
 
@@ -449,50 +489,33 @@ def install(app):
         try:
             o=c.execute("SELECT * FROM opportunities WHERE id=?",(opp_id,)).fetchone()
             if not o: return RedirectResponse("/opportunities",303)
-            try: raw=json.loads(o["raw_json"] or "{}")
-            except Exception: raw={}
-            urls=_collect_urls(raw)
-            # Prefer likely bid documents/resources, but retain a few general source links.
-            def rank(u):
-                low=u.lower()
-                score=0
-                for token in (".pdf","attachment","document","solicitation","spec","drawing","plans","package","resource"): 
-                    if token in low: score+=2
-                if "sam.gov" in low: score+=1
-                return score
-            urls=sorted(urls,key=rank,reverse=True)[:12]
-            texts=[]; inspected=[]; failures=[]
-            for u in urls:
-                try:
-                    txt,kind=_fetch_document_text(u)
-                    if txt and len(txt.strip())>40:
-                        texts.append(txt)
-                        inspected.append(u)
-                    else:
-                        failures.append(kind)
-                except Exception as e:
-                    failures.append(type(e).__name__)
-            base=" ".join([o["title"] or "",o["description"] or ""]+texts)
-            trade,divisions,confidence,evidence=analyze_scope_text(base)
-            if trade and texts: review_status="Scope Found in Retrieved Documents"
-            elif trade: review_status="Scope Found in Notice"
-            elif texts: review_status="Documents Checked - No Scope Found"
-            elif urls: review_status="Document Retrieval Failed"
-            else: review_status="No Public Bid Documents Found"
-            detail=evidence
-            if inspected:
-                detail += " | Documents analyzed: "+str(len(inspected))
-            elif failures:
-                detail += " | Retrieval attempts failed/unreadable: "+str(len(failures))
-            c.execute("""INSERT INTO opportunity_scope_analysis(opportunity_id,review_status,confirmed_trade,csi_divisions,confidence,evidence,document_url,reviewed_at,updated_at)
-                         VALUES (?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
-                         ON CONFLICT(opportunity_id) DO UPDATE SET review_status=excluded.review_status,confirmed_trade=excluded.confirmed_trade,
-                         csi_divisions=excluded.csi_divisions,confidence=excluded.confidence,evidence=excluded.evidence,document_url=excluded.document_url,
-                         reviewed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP""",
-                      (opp_id,review_status,trade,divisions,confidence,detail,inspected[0] if inspected else ""))
+            _auto_scope_for_row(c,o)
             c.commit()
         finally: c.close()
         return RedirectResponse(f"/opportunities/{opp_id}/scope",303)
+
+    @app.post("/opportunities/scope/auto-batch")
+    def opportunity_scope_auto_batch(limit:int=Form(8)):
+        limit=max(1,min(int(limit or 8),12))
+        c=_conn()
+        reviewed=found=0
+        try:
+            rows=c.execute("""SELECT o.* FROM opportunities o
+                              LEFT JOIN opportunity_scope_analysis a ON a.opportunity_id=o.id
+                              WHERE o.match_score>=18 AND (a.opportunity_id IS NULL OR a.review_status IN ('Not Reviewed','Document Retrieval Failed'))
+                              ORDER BY CASE WHEN o.trade='Construction Review' THEN 1 ELSE 0 END,
+                                       o.match_score DESC,
+                                       CASE WHEN o.due_date IS NULL OR o.due_date='' THEN 1 ELSE 0 END,
+                                       o.due_date
+                              LIMIT ?""",(limit,)).fetchall()
+            for o in rows:
+                result=_auto_scope_for_row(c,o)
+                reviewed+=1
+                if result["trade"]: found+=1
+            c.commit()
+        finally: c.close()
+        q=urllib.parse.urlencode({"batch":"1","reviewed":reviewed,"scope_found":found})
+        return RedirectResponse("/opportunities?"+q,303)
 
     @app.post("/opportunities/{opp_id}/scope/analyze")
     def opportunity_scope_analyze(opp_id:int,document_text:str=Form("")):
