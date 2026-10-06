@@ -1,0 +1,81 @@
+{% extends 'base.html' %}
+{% block title %}{{g.sheet_no}} Geometry | INSOLIX{% endblock %}
+{% block heading %}{{g.sheet_no}} Blueprint Takeoff{% endblock %}
+{% block subheading %}{{g.filename}} • {{'Vector PDF' if g.is_vector else 'Raster / flattened PDF'}} • {{g.scale_label or 'Scale not set'}}{% endblock %}
+{% block content %}
+{% if request.query_params.get('error')=='no_scale' %}<div class="notice">Set or calibrate this sheet's scale before measuring.</div>{% endif %}
+<div class="grid2">
+<section class="card">
+<h2>Sheet Calibration</h2>
+<p><b>Scale:</b> {{g.scale_label or 'Not detected'}}<br><b>Source:</b> {{g.scale_source}} • <b>Confidence:</b> {{g.confidence}}%</p>
+<p class="muted">If the detected scale is wrong or blank: choose Calibration, click two endpoints of a printed dimension, enter the real length in feet, then save calibration.</p>
+<form id="calForm" method="post" action="/estimator/{{p.id}}/geometry/{{g.document_id}}/{{g.page_no}}/calibrate">
+<input type="hidden" name="x1" id="calx1"><input type="hidden" name="y1" id="caly1"><input type="hidden" name="x2" id="calx2"><input type="hidden" name="y2" id="caly2">
+<input type="hidden" name="image_width" class="imgw"><input type="hidden" name="image_height" class="imgh">
+<label>Known real length (feet)<input type="number" step="0.001" name="known_feet" required></label>
+<button type="button" onclick="setMode('calibrate')">Start Calibration Clicks</button> <button>Save Calibration</button>
+</form>
+</section>
+<section class="card">
+<h2>Measurement</h2>
+<form id="measureForm" method="post" action="/estimator/{{p.id}}/geometry/{{g.document_id}}/{{g.page_no}}/measure">
+<input type="hidden" name="x1" id="mx1"><input type="hidden" name="y1" id="my1"><input type="hidden" name="x2" id="mx2"><input type="hidden" name="y2" id="my2">
+<input type="hidden" name="image_width" class="imgw"><input type="hidden" name="image_height" class="imgh">
+<div class="row"><label>Measurement<select name="measure_type" id="measureType"><option value="line">Line / Wall Length (LF)</option><option value="area">Area (SF)</option><option value="opening">Opening Deduction (SF)</option></select></label>
+<label>Trade<select name="trade">{% for t in ['Insulation','Spray Foam','Firestop / Air Seal','Masonry','Natural Stone','Stucco'] %}<option>{{t}}</option>{% endfor %}</select></label></div>
+<div class="row"><label>Scope<input name="scope_type" value="Exterior Walls"></label><label>Assembly<input name="assembly" placeholder="W1 / M2 / North Elevation"></label></div>
+<label>Source label<input name="source_label" value="{{g.sheet_no}}"></label>
+<input type="hidden" name="confidence" value="{{100 if g.scale_source=='Manual calibration' else g.confidence}}">
+<button type="button" onclick="setMode('measure')">Start Measurement Clicks</button> <button>Save Measurement</button>
+</form>
+<p class="muted">Line = two endpoints. Area/opening = two opposite rectangle corners. Polygon tracing and automatic wall-pair recognition are the next geometry layer.</p>
+</section>
+</div>
+
+<section class="card" style="overflow:auto">
+<div id="modeLabel" class="notice">Choose Calibration or Measurement, then click two points on the plan.</div>
+<div id="planWrap" style="position:relative;display:inline-block;max-width:none">
+<img id="planImg" src="/estimator/{{p.id}}/geometry/{{g.document_id}}/{{g.page_no}}.png" style="display:block;max-width:none;cursor:crosshair">
+<svg id="overlay" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none"></svg>
+</div>
+</section>
+
+<section class="card"><h2>Saved Measurements on {{g.sheet_no}}</h2><table>
+<tr><th>Type</th><th>Trade</th><th>Scope</th><th>Value</th><th>Status</th></tr>
+{% for m in measurements %}<tr><td>{{m.measure_type}}</td><td>{{m.trade}}</td><td>{{m.scope_type}} {{m.assembly or ''}}</td>
+<td>{% if m.sign<0 %}-{% endif %}{{"%.1f"|format(m.value)}} {{m.unit}}</td><td>{{'Verified geometry' if m.verified else 'Review'}}</td></tr>
+{% else %}<tr><td colspan="5" class="empty">No measurements yet.</td></tr>{% endfor %}
+</table></section>
+<p><a class="smallbtn" href="/estimator/{{p.id}}/geometry">← Geometry Sheets</a></p>
+
+<script>
+let mode=null, pts=[];
+const img=document.getElementById('planImg'), svg=document.getElementById('overlay'), label=document.getElementById('modeLabel');
+function setMode(m){mode=m;pts=[];svg.innerHTML='';label.textContent=(m==='calibrate'?'Calibration':'Measurement')+': click point 1, then point 2.';}
+function syncDims(){document.querySelectorAll('.imgw').forEach(x=>x.value=img.naturalWidth);document.querySelectorAll('.imgh').forEach(x=>x.value=img.naturalHeight);}
+img.onload=syncDims;
+img.addEventListener('click',e=>{
+ if(!mode)return;
+ const r=img.getBoundingClientRect();
+ const x=(e.clientX-r.left)*(img.naturalWidth/r.width), y=(e.clientY-r.top)*(img.naturalHeight/r.height);
+ pts.push([x,y]);
+ if(pts.length>2)pts=[[x,y]];
+ draw();
+ if(pts.length===2){
+   if(mode==='calibrate'){calx1.value=pts[0][0];caly1.value=pts[0][1];calx2.value=pts[1][0];caly2.value=pts[1][1];}
+   else{mx1.value=pts[0][0];my1.value=pts[0][1];mx2.value=pts[1][0];my2.value=pts[1][1];}
+   label.textContent='Two points selected. Review fields and save.';
+ }
+});
+function draw(){
+ const w=img.clientWidth,h=img.clientHeight,nw=img.naturalWidth,nh=img.naturalHeight; svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
+ svg.innerHTML='';
+ const conv=p=>[p[0]*w/nw,p[1]*h/nh];
+ pts.forEach(p=>{const q=conv(p);svg.innerHTML+=`<circle cx="${q[0]}" cy="${q[1]}" r="5" fill="red"/>`;});
+ if(pts.length===2){const a=conv(pts[0]),b=conv(pts[1]); const mt=document.getElementById('measureType').value;
+ if(mode==='measure' && (mt==='area'||mt==='opening')){svg.innerHTML+=`<rect x="${Math.min(a[0],b[0])}" y="${Math.min(a[1],b[1])}" width="${Math.abs(a[0]-b[0])}" height="${Math.abs(a[1]-b[1])}" fill="rgba(255,0,0,.12)" stroke="red" stroke-width="2"/>`;}
+ else{svg.innerHTML+=`<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="red" stroke-width="3"/>`;}}
+}
+window.addEventListener('resize',draw);
+</script>
+{% endblock %}
