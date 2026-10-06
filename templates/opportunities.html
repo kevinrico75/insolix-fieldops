@@ -66,7 +66,9 @@
       <select name="status" onchange="this.form.submit()">{% for s in ['New','Saved','Passed','Converted'] %}<option {% if o.status==s %}selected{% endif %}>{{s}}</option>{% endfor %}</select>
     </form>
   </td>
-  <td><a class="smallbtn" href="/opportunities/{{o.id}}/scope">Analyze Scope</a>{% if o.status!='Converted' %}<form method="post" action="/opportunities/{{o.id}}/convert" style="margin-top:6px"><button class="smallbtn">Create Lead</button></form>{% else %}<span class="muted">In Leads</span>{% endif %}</td>
+  <td><a class="smallbtn" href="/opportunities/{{o.id}}/scope">Analyze Scope</a>
+<form method="post" action="/estimator/from-opportunity/{{o.id}}" style="margin-top:6px"><button class="smallbtn">Send to Estimator</button></form>
+{% if o.status!='Converted' %}<form method="post" action="/opportunities/{{o.id}}/convert" style="margin-top:6px"><button class="smallbtn">Create Lead</button></form>{% else %}<span class="muted">In Leads</span>{% endif %}</td>
 </tr>
 {% else %}
 <tr><td colspan="7" class="empty">No matched opportunities yet. Configure a source and click Sync Sources Now.</td></tr>
