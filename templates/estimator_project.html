@@ -5,6 +5,7 @@
 {% block content %}
 {% if request.query_params.get('analyzed') is not none %}<div class="notice success">AI scope scan created {{request.query_params.get('analyzed')}} new takeoff items. Quantities without explicit plan/spec evidence remain marked Needs Measurement.</div>{% endif %}
 {% if request.query_params.get('estimate_error') %}<div class="notice">No verified non-zero quantities are ready to send to an estimate yet.</div>{% endif %}
+{% if request.query_params.get('geometry_scanned') %}<div class="notice success">Blueprint geometry scan indexed {{request.query_params.get('geometry_scanned')}} plan pages. Open Blueprint Geometry Takeoff to measure/verify sheets.</div>{% endif %}
 
 <div class="grid2">
 <section class="card">
@@ -22,6 +23,8 @@
   <h2>Estimator Controls</h2>
   <p><b>Status:</b> {{p.status}}</p><p><b>Source:</b> {{p.source_name or 'Manual'}}</p>
   {% if p.source_url %}<p><a class="smallbtn" href="{{p.source_url}}" target="_blank" rel="noopener">Open Source Project</a></p>{% endif %}
+  <p><a class="smallbtn" href="/estimator/{{p.id}}/geometry">Blueprint Geometry Takeoff</a></p>
+  <form method="post" action="/estimator/{{p.id}}/geometry/scan" style="margin-bottom:10px"><button class="secondary">Scan Blueprint Geometry</button></form>
   <form method="post" action="/estimator/{{p.id}}/create-estimate"><button>Create INSOLIX Estimate from Verified Quantities</button></form>
   <p class="muted">Only takeoff items with a non-zero verified quantity are transferred. Pricebook-linked items carry current INSOLIX costs and sell prices.</p>
 </section>
