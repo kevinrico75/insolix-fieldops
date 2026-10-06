@@ -1,0 +1,33 @@
+{% extends 'base.html' %}
+{% block title %}Blueprint Geometry | {{p.title}}{% endblock %}
+{% block heading %}Blueprint Geometry{% endblock %}
+{% block subheading %}{{p.title}} • calibrated vector/raster takeoff workspace{% endblock %}
+{% block content %}
+<section class="card">
+<div class="section-title"><h2>Geometry Engine</h2><form method="post" action="/estimator/{{p.id}}/geometry/scan"><button>Rescan Plans</button></form></div>
+<p class="muted">Vector sheets are detected automatically. Drawing scale is read from sheet text when possible; otherwise calibrate with a known dimension. Measurements are not treated as verified quantities until a scale exists.</p>
+</section>
+<section class="card"><h2>Sheets</h2><div class="table-wrap"><table>
+<tr><th>Sheet</th><th>File</th><th>PDF Type</th><th>Scale</th><th>Confidence</th><th></th></tr>
+{% for g in pages %}<tr><td><b>{{g.sheet_no}}</b><br><small>Page {{g.page_no+1}}</small></td><td>{{g.filename}}<br><small>{{g.revision_label}}</small></td>
+<td>{{'Vector' if g.is_vector else 'Raster / flattened'}}<br><small>{{g.vector_segment_count}} vector primitives</small></td>
+<td>{{g.scale_label or 'Not detected'}}<br><small>{{g.scale_source}}</small></td><td>{{g.confidence}}%</td>
+<td><a class="smallbtn" href="/estimator/{{p.id}}/geometry/{{g.document_id}}/{{g.page_no}}">Measure Sheet</a></td></tr>
+{% else %}<tr><td colspan="6" class="empty">No scanned blueprint pages yet. Upload plans, then click Rescan Plans.</td></tr>{% endfor %}
+</table></div></section>
+
+<section class="card"><h2>Geometry Measurements</h2><div class="table-wrap"><table>
+<tr><th>Sheet</th><th>Trade / Scope</th><th>Type</th><th>Quantity</th><th>Takeoff</th></tr>
+{% for m in measurements %}<tr><td>{{m.sheet_no}}</td><td>{{m.trade}}<br><small>{{m.scope_type}} {{m.assembly or ''}}</small></td>
+<td>{{m.measure_type}}</td><td><b>{% if m.sign<0 %}-{% endif %}{{"%.1f"|format(m.value)}} {{m.unit}}</b></td>
+<td>{{'Pushed #' ~ m.pushed_takeoff_id if m.pushed_takeoff_id else 'Ready'}}</td></tr>
+{% else %}<tr><td colspan="5" class="empty">No geometry measurements yet.</td></tr>{% endfor %}
+</table></div>
+<details><summary><b>Push a measurement group into Takeoff</b></summary>
+<form method="post" action="/estimator/{{p.id}}/geometry/push">
+<div class="row"><label>Trade<select name="trade">{% for t in ['Insulation','Spray Foam','Firestop / Air Seal','Masonry','Natural Stone','Stucco'] %}<option>{{t}}</option>{% endfor %}</select></label>
+<label>Scope<input name="scope_type" value="Exterior Walls"></label><label>Assembly<input name="assembly" placeholder="W1 / M2 / North Elevation"></label></div>
+<button>Create Geometry-Backed Takeoff Item</button></form></details>
+</section>
+<p><a class="smallbtn" href="/estimator/{{p.id}}">← Back to Estimator</a></p>
+{% endblock %}
