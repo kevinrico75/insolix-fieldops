@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% block title %}Estimator | INSOLIX{% endblock %}
+{% block heading %}INSOLIX Estimator{% endblock %}
+{% block subheading %}Blueprint, specification, takeoff and estimating workspace{% endblock %}
+{% block content %}
+<div class="cards kpis">
+  <div class="card metric"><span class="metric-icon blue">▤</span><div><small>Estimator Projects</small><b>{{projects|length}}</b></div></div>
+  <div class="card metric"><span class="metric-icon green">✓</span><div><small>Purpose</small><b style="font-size:18px">Evidence-based takeoffs</b></div></div>
+</div>
+<section class="card">
+  <div class="section-title"><h2>Projects in Estimating</h2><span class="muted">Projects enter here from Opportunity Finder after trade review.</span></div>
+  <div class="table-wrap"><table>
+    <tr><th>Project</th><th>Source</th><th>Due</th><th>Documents</th><th>Takeoff Items</th><th>Status</th><th></th></tr>
+    {% for p in projects %}
+    <tr><td><b>{{p.title}}</b><br><small>{{p.company or '—'}} • {{p.location or '—'}}</small></td>
+    <td>{{p.source_name or 'Manual'}}</td><td>{{p.due_date or '—'}}</td><td>{{p.doc_count}}</td><td>{{p.item_count}}</td>
+    <td><span class="status">{{p.status}}</span></td><td><a class="smallbtn" href="/estimator/{{p.id}}">Open Estimator</a></td></tr>
+    {% else %}<tr><td colspan="7" class="empty">No estimator projects yet. Send a project from Opportunity Finder.</td></tr>{% endfor %}
+  </table></div>
+</section>
+{% endblock %}
