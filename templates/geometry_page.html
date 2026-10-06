@@ -21,14 +21,26 @@
 <form id="measureForm" method="post" action="/estimator/{{p.id}}/geometry/{{g.document_id}}/{{g.page_no}}/measure">
 <input type="hidden" name="x1" id="mx1"><input type="hidden" name="y1" id="my1"><input type="hidden" name="x2" id="mx2"><input type="hidden" name="y2" id="my2">
 <input type="hidden" name="image_width" class="imgw"><input type="hidden" name="image_height" class="imgh">
-<div class="row"><label>Measurement<select name="measure_type" id="measureType"><option value="line">Line / Wall Length (LF)</option><option value="area">Area (SF)</option><option value="opening">Opening Deduction (SF)</option></select></label>
+<div class="row"><label>Measurement<select name="measure_type" id="measureType"><option value="line">Line / Wall Length (LF)</option><option value="wall_area">Wall Area from Run × Height (SF)</option><option value="area">Rectangle Area (SF)</option><option value="opening">Opening Deduction (SF)</option></select></label>
 <label>Trade<select name="trade">{% for t in ['Insulation','Spray Foam','Firestop / Air Seal','Masonry','Natural Stone','Stucco'] %}<option>{{t}}</option>{% endfor %}</select></label></div>
 <div class="row"><label>Scope<input name="scope_type" value="Exterior Walls"></label><label>Assembly<input name="assembly" placeholder="W1 / M2 / North Elevation"></label></div>
-<label>Source label<input name="source_label" value="{{g.sheet_no}}"></label>
+<label>Wall Height (ft) <small>used for Wall Area mode</small><input type="number" step="0.01" name="wall_height" value="0"></label><label>Source label<input name="source_label" value="{{g.sheet_no}}"></label>
 <input type="hidden" name="confidence" value="{{100 if g.scale_source=='Manual calibration' else g.confidence}}">
 <button type="button" onclick="setMode('measure')">Start Measurement Clicks</button> <button>Save Measurement</button>
 </form>
-<p class="muted">Line = two endpoints. Area/opening = two opposite rectangle corners. Polygon tracing and automatic wall-pair recognition are the next geometry layer.</p>
+<p class="muted">Line and wall-area modes use two endpoints. Rectangle area/opening uses two opposite corners.</p>
+<hr><h3>Polygon / Irregular Area</h3>
+<form id="polyForm" method="post" action="/estimator/{{p.id}}/geometry/{{g.document_id}}/{{g.page_no}}/polygon">
+<input type="hidden" name="points_json" id="polyPoints"><input type="hidden" name="image_width" class="imgw"><input type="hidden" name="image_height" class="imgh">
+<div class="row"><label>Trade<select name="trade">{% for t in ['Insulation','Spray Foam','Firestop / Air Seal','Masonry','Natural Stone','Stucco'] %}<option>{{t}}</option>{% endfor %}</select></label>
+<label>Scope<input name="scope_type" value="Attic / Roof"></label><label>Assembly<input name="assembly" placeholder="Roof Area A / Elevation N"></label></div>
+<div class="row"><label>Type<select name="sign"><option value="1">Positive Area</option><option value="-1">Deduction</option></select></label>
+<label>Source label<input name="source_label" value="{{g.sheet_no}}"></label></div>
+<input type="hidden" name="confidence" value="{{100 if g.scale_source=='Manual calibration' else g.confidence}}">
+<button type="button" onclick="setMode('polygon')">Start Polygon Trace</button>
+<button type="button" class="secondary" onclick="finishPolygon()">Close Polygon</button>
+<button>Save Polygon Area</button>
+</form>
 </section>
 </div>
 
@@ -76,20 +88,28 @@ img.addEventListener('click',e=>{
  const r=img.getBoundingClientRect();
  const x=(e.clientX-r.left)*(img.naturalWidth/r.width), y=(e.clientY-r.top)*(img.naturalHeight/r.height);
  pts.push([x,y]);
- if(pts.length>2)pts=[[x,y]];
+ if(mode!=='polygon' && pts.length>2)pts=[[x,y]];
  draw();
+ if(mode==='polygon'){document.getElementById('polyPoints').value=JSON.stringify(pts);label.textContent='Polygon: '+pts.length+' points selected. Add points, then Close Polygon.';return;}
  if(pts.length===2){
    if(mode==='calibrate'){calx1.value=pts[0][0];caly1.value=pts[0][1];calx2.value=pts[1][0];caly2.value=pts[1][1];}
    else{mx1.value=pts[0][0];my1.value=pts[0][1];mx2.value=pts[1][0];my2.value=pts[1][1];}
    label.textContent='Two points selected. Review fields and save.';
  }
 });
+function finishPolygon(){
+ if(mode!=='polygon'||pts.length<3){label.textContent='Polygon needs at least 3 points.';return;}
+ document.getElementById('polyPoints').value=JSON.stringify(pts); draw(); label.textContent='Polygon closed. Save Polygon Area when ready.';
+}
 function draw(){
  const w=img.clientWidth,h=img.clientHeight,nw=img.naturalWidth,nh=img.naturalHeight; svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
  svg.innerHTML='';
  const conv=p=>[p[0]*w/nw,p[1]*h/nh];
  pts.forEach(p=>{const q=conv(p);svg.innerHTML+=`<circle cx="${q[0]}" cy="${q[1]}" r="5" fill="red"/>`;});
- if(pts.length===2){const a=conv(pts[0]),b=conv(pts[1]); const mt=document.getElementById('measureType').value;
+ if(mode==='polygon' && pts.length>=2){
+   const q=pts.map(conv), all=(pts.length>=3?q.concat([q[0]]):q);
+   svg.innerHTML+=`<polyline points="${all.map(p=>p[0]+','+p[1]).join(' ')}" fill="${pts.length>=3?'rgba(255,0,0,.10)':'none'}" stroke="red" stroke-width="2"/>`;
+ } else if(pts.length===2){const a=conv(pts[0]),b=conv(pts[1]); const mt=document.getElementById('measureType').value;
  if(mode==='measure' && (mt==='area'||mt==='opening')){svg.innerHTML+=`<rect x="${Math.min(a[0],b[0])}" y="${Math.min(a[1],b[1])}" width="${Math.abs(a[0]-b[0])}" height="${Math.abs(a[1]-b[1])}" fill="rgba(255,0,0,.12)" stroke="red" stroke-width="2"/>`;}
  else{svg.innerHTML+=`<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="red" stroke-width="3"/>`;}}
 }
