@@ -35,6 +35,21 @@ def init_geometry_db():
           updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
           UNIQUE(document_id,page_no)
         );
+        CREATE TABLE IF NOT EXISTS estimator_geometry_suggestions(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL,
+          document_id INTEGER NOT NULL,
+          page_no INTEGER NOT NULL,
+          sheet_no TEXT,
+          kind TEXT NOT NULL,
+          coords_json TEXT NOT NULL,
+          value REAL,
+          unit TEXT,
+          confidence INTEGER DEFAULT 60,
+          reason TEXT,
+          status TEXT DEFAULT 'Proposed',
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS estimator_geometry_measurements(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           project_id INTEGER NOT NULL,
@@ -140,12 +155,69 @@ def scan_document(project_id,document_id):
         c.commit(); doc.close(); return n
     finally:c.close()
 
+
+def generate_vector_suggestions(project_id,document_id,page_no):
+    c=_conn()
+    try:
+        g=c.execute("SELECT * FROM estimator_geometry_pages WHERE project_id=? AND document_id=? AND page_no=?",
+                    (project_id,document_id,page_no)).fetchone()
+        d=c.execute("SELECT * FROM estimator_documents WHERE id=? AND project_id=?",(document_id,project_id)).fetchone()
+        if not g or not d or not g["feet_per_point"] or not g["is_vector"]: return 0
+        path=os.path.join(UPLOAD_ROOT,d["stored_name"])
+        if not os.path.exists(path): return 0
+        doc=fitz.open(path); page=doc[page_no]
+        fpp=float(g["feet_per_point"])
+        candidates=[]
+        for dr in page.get_drawings():
+            for item in dr.get("items",[]):
+                if not item or item[0]!="l": continue
+                p1,p2=item[1],item[2]
+                dx=float(p2.x-p1.x); dy=float(p2.y-p1.y)
+                length_pt=math.hypot(dx,dy)
+                length_ft=length_pt*fpp
+                if length_ft<4 or length_ft>250: continue
+                angle=abs(math.degrees(math.atan2(dy,dx)))%180
+                axis=min(abs(angle-0),abs(angle-90),abs(angle-180))
+                if axis>3.0: continue
+                candidates.append((length_ft,[float(p1.x),float(p1.y)],[float(p2.x),float(p2.y)],axis))
+        # Avoid flooding: keep longest unique runs first.
+        candidates=sorted(candidates,key=lambda x:x[0],reverse=True)[:120]
+        c.execute("DELETE FROM estimator_geometry_suggestions WHERE project_id=? AND document_id=? AND page_no=? AND status='Proposed'",
+                  (project_id,document_id,page_no))
+        created=0
+        seen=[]
+        for length_ft,p1,p2,axis in candidates:
+            cx=(p1[0]+p2[0])/2; cy=(p1[1]+p2[1])/2
+            duplicate=False
+            for sx,sy,sl in seen:
+                if abs(cx-sx)<8 and abs(cy-sy)<8 and abs(length_ft-sl)<1.5:
+                    duplicate=True; break
+            if duplicate: continue
+            seen.append((cx,cy,length_ft))
+            conf=82 if axis<1 else 72
+            c.execute("""INSERT INTO estimator_geometry_suggestions(project_id,document_id,page_no,sheet_no,kind,coords_json,value,unit,confidence,reason)
+                         VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                      (project_id,document_id,page_no,g["sheet_no"],"wall_run",
+                       json.dumps({"pdf":[p1,p2]}),length_ft,"LF",conf,
+                       "Long axis-aligned vector line detected; candidate wall/run only, not yet classified."))
+            created+=1
+        c.commit(); doc.close(); return created
+    finally:c.close()
+
 def scan_project(project_id):
     c=_conn()
     try:
         docs=c.execute("SELECT id FROM estimator_documents WHERE project_id=? AND lower(filename) LIKE '%.pdf' ORDER BY id",(project_id,)).fetchall()
     finally:c.close()
-    return sum(scan_document(project_id,d["id"]) for d in docs)
+    total=sum(scan_document(project_id,d["id"]) for d in docs)
+    c=_conn()
+    try:
+        pages=c.execute("SELECT document_id,page_no FROM estimator_geometry_pages WHERE project_id=? AND is_vector=1 AND feet_per_point IS NOT NULL",(project_id,)).fetchall()
+    finally:c.close()
+    for p in pages:
+        try: generate_vector_suggestions(project_id,p["document_id"],p["page_no"])
+        except Exception: pass
+    return total
 
 def _page_path(c,project_id,document_id):
     d=c.execute("SELECT * FROM estimator_documents WHERE id=? AND project_id=?",(document_id,project_id)).fetchone()
@@ -190,9 +262,11 @@ def install(app):
                            WHERE g.project_id=? AND g.document_id=? AND g.page_no=?""",(project_id,document_id,page_no)).fetchone()
             ms=c.execute("""SELECT * FROM estimator_geometry_measurements WHERE project_id=? AND document_id=? AND page_no=? ORDER BY id""",
                          (project_id,document_id,page_no)).fetchall()
+            suggestions=c.execute("""SELECT * FROM estimator_geometry_suggestions WHERE project_id=? AND document_id=? AND page_no=? AND status='Proposed'
+                                     ORDER BY confidence DESC,value DESC LIMIT 120""",(project_id,document_id,page_no)).fetchall()
         finally:c.close()
         if not p or not g:return RedirectResponse(f"/estimator/{project_id}/geometry",303)
-        return templates.TemplateResponse("geometry_page.html",{"request":request,"p":p,"g":g,"measurements":ms})
+        return templates.TemplateResponse("geometry_page.html",{"request":request,"p":p,"g":g,"measurements":ms,"suggestions":suggestions})
 
     @app.get("/estimator/{project_id}/geometry/{document_id}/{page_no}.png")
     def geometry_image(project_id:int,document_id:int,page_no:int):
@@ -223,6 +297,41 @@ def install(app):
                     c.execute("""UPDATE estimator_geometry_pages SET feet_per_point=?,scale_label=?,scale_source='Manual calibration',
                                confidence=100,updated_at=CURRENT_TIMESTAMP WHERE id=?""",(fpp,f"Calibrated: {known_feet:g} ft reference",g["id"]))
                     c.commit()
+        finally:c.close()
+        return RedirectResponse(f"/estimator/{project_id}/geometry/{document_id}/{page_no}",303)
+
+    @app.post("/estimator/{project_id}/geometry/{document_id}/{page_no}/suggestions")
+    def geometry_suggestions(project_id:int,document_id:int,page_no:int):
+        n=generate_vector_suggestions(project_id,document_id,page_no)
+        return RedirectResponse(f"/estimator/{project_id}/geometry/{document_id}/{page_no}?suggestions={n}",303)
+
+    @app.post("/estimator/{project_id}/geometry/{document_id}/{page_no}/accept-suggestion/{suggestion_id}")
+    def geometry_accept_suggestion(project_id:int,document_id:int,page_no:int,suggestion_id:int,
+                                   trade:str=Form("Insulation"),scope_type:str=Form("Exterior Walls"),assembly:str=Form("")):
+        c=_conn()
+        try:
+            sug=c.execute("""SELECT * FROM estimator_geometry_suggestions WHERE id=? AND project_id=? AND document_id=? AND page_no=?""",
+                          (suggestion_id,project_id,document_id,page_no)).fetchone()
+            if sug and sug["status"]=="Proposed":
+                coords=json.loads(sug["coords_json"] or "{}")
+                c.execute("""INSERT INTO estimator_geometry_measurements(project_id,document_id,page_no,sheet_no,measure_type,coords_json,value,unit,sign,
+                           trade,scope_type,assembly,source_label,confidence,verified)
+                           VALUES(?,?,?,?,?,?,?,?,1,?,?,?,?,?,1)""",
+                          (project_id,document_id,page_no,sug["sheet_no"],"line",json.dumps(coords),sug["value"],sug["unit"],
+                           trade,scope_type,assembly,sug["sheet_no"],min(int(sug["confidence"] or 0),85)))
+                c.execute("UPDATE estimator_geometry_suggestions SET status='Accepted' WHERE id=?",(suggestion_id,))
+                c.commit()
+        finally:c.close()
+        return RedirectResponse(f"/estimator/{project_id}/geometry/{document_id}/{page_no}",303)
+
+    @app.post("/estimator/{project_id}/geometry/{document_id}/{page_no}/reject-suggestion/{suggestion_id}")
+    def geometry_reject_suggestion(project_id:int,document_id:int,page_no:int,suggestion_id:int):
+        c=_conn()
+        try:
+            c.execute("""UPDATE estimator_geometry_suggestions SET status='Rejected'
+                         WHERE id=? AND project_id=? AND document_id=? AND page_no=?""",
+                      (suggestion_id,project_id,document_id,page_no))
+            c.commit()
         finally:c.close()
         return RedirectResponse(f"/estimator/{project_id}/geometry/{document_id}/{page_no}",303)
 
