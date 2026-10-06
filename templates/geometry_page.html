@@ -40,6 +40,23 @@
 </div>
 </section>
 
+<section class="card">
+<div class="section-title"><h2>Automatic Vector Suggestions</h2>
+<form method="post" action="/estimator/{{p.id}}/geometry/{{g.document_id}}/{{g.page_no}}/suggestions"><button class="secondary">Find Wall-Run Candidates</button></form></div>
+<p class="muted">INSOLIX scans vector linework for long axis-aligned runs. These are only geometry candidates—not verified walls—until you classify and accept them.</p>
+{% if request.query_params.get('suggestions') %}<div class="notice success">Generated {{request.query_params.get('suggestions')}} vector candidates.</div>{% endif %}
+<div class="table-wrap"><table>
+<tr><th>Candidate</th><th>Length</th><th>Confidence</th><th>Classify / Accept</th><th></th></tr>
+{% for s in suggestions %}
+<tr><td>{{s.reason}}</td><td><b>{{"%.1f"|format(s.value)}} {{s.unit}}</b></td><td>{{s.confidence}}%</td>
+<td><form method="post" action="/estimator/{{p.id}}/geometry/{{g.document_id}}/{{g.page_no}}/accept-suggestion/{{s.id}}">
+<select name="trade">{% for tr in ['Insulation','Spray Foam','Firestop / Air Seal','Masonry','Natural Stone','Stucco'] %}<option>{{tr}}</option>{% endfor %}</select>
+<input name="scope_type" value="Exterior Walls" placeholder="Scope"><input name="assembly" placeholder="W1 / M2 / Elevation">
+<button class="smallbtn">Accept as Measured Run</button></form></td>
+<td><form method="post" action="/estimator/{{p.id}}/geometry/{{g.document_id}}/{{g.page_no}}/reject-suggestion/{{s.id}}"><button class="smallbtn secondary">Reject</button></form></td></tr>
+{% else %}<tr><td colspan="5" class="empty">No unreviewed vector candidates.</td></tr>{% endfor %}
+</table></div></section>
+
 <section class="card"><h2>Saved Measurements on {{g.sheet_no}}</h2><table>
 <tr><th>Type</th><th>Trade</th><th>Scope</th><th>Value</th><th>Status</th></tr>
 {% for m in measurements %}<tr><td>{{m.measure_type}}</td><td>{{m.trade}}</td><td>{{m.scope_type}} {{m.assembly or ''}}</td>
