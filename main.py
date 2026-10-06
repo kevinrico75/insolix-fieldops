@@ -1,11 +1,13 @@
 from app import app
 from opportunity_feature import install as install_opportunities
 from estimator_feature import install as install_estimator
+from geometry_feature import install as install_geometry
 from agent_feature import install as install_agents, run_queue
 import threading, time, os
 
 install_opportunities(app)
 install_estimator(app)
+install_geometry(app)
 install_agents(app)
 
 def _agent_loop():
