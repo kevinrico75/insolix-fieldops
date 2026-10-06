@@ -1,0 +1,32 @@
+{% extends 'base.html' %}
+{% block title %}AI Team | INSOLIX{% endblock %}
+{% block heading %}INSOLIX AI Team{% endblock %}
+{% block subheading %}Controlled autonomous agents with least-privilege permissions and full audit logging{% endblock %}
+{% block content %}
+{% if request.query_params.get('run') %}<div class="notice success">Agent run complete: {{request.query_params.get('done')}} of {{request.query_params.get('total')}} queued tasks completed.</div>{% endif %}
+<section class="card">
+<div class="section-title"><h2>Agent Control</h2><form method="post" action="/agents/run"><button>Run AI Team Now</button></form></div>
+<p class="muted">Agents may analyze, triage, build takeoffs, create draft estimates, and flag issues. They cannot send bids, change pricebook rules, modify company settings, touch QuickBooks credentials, send invoices, collect/refund payments, or approve their own work.</p>
+</section>
+<div class="grid2">
+{% for a in agents %}
+<section class="card">
+<div class="section-title"><h2>{{a.name}}</h2><span class="status">{{'Active' if a.active else 'Paused'}}</span></div>
+<p><b>{{a.role}}</b></p><p class="muted">{{a.description}}</p>
+<p><b>{{a.queued}}</b> queued • <b>{{a.completed}}</b> completed{% if a.last_run_at %} • last run {{a.last_run_at[:16]}}{% endif %}</p>
+<details><summary>Permissions</summary><ul>{% for p in perms[a.id] %}<li><code>{{p}}</code></li>{% endfor %}</ul></details>
+<form method="post" action="/agents/{{a.id}}/toggle"><button class="secondary">{{'Pause Agent' if a.active else 'Enable Agent'}}</button></form>
+</section>
+{% endfor %}
+</div>
+<section class="card"><h2>Task Queue</h2><div class="table-wrap"><table>
+<tr><th>ID</th><th>Agent</th><th>Task</th><th>Related</th><th>Status</th><th>Created</th></tr>
+{% for t in tasks %}<tr><td>#{{t.id}}</td><td>{{t.agent_name}}</td><td>{{t.task_type}}</td><td>{{t.related_type or '—'}} #{{t.related_id or '—'}}</td><td><span class="status">{{t.status}}</span></td><td>{{t.created_at[:16]}}</td></tr>
+{% else %}<tr><td colspan="6" class="empty">No agent tasks yet.</td></tr>{% endfor %}
+</table></div></section>
+<section class="card"><h2>Audit Log</h2><div class="table-wrap"><table>
+<tr><th>Time</th><th>Agent</th><th>Action</th><th>Record</th><th>Detail</th></tr>
+{% for a in audit %}<tr><td>{{a.created_at[:16]}}</td><td>{{a.agent_name}}</td><td>{{a.action}}</td><td>{{a.related_type or '—'}} {% if a.related_id %}#{{a.related_id}}{% endif %}</td><td>{{a.detail or ''}}</td></tr>
+{% else %}<tr><td colspan="5" class="empty">No agent actions yet.</td></tr>{% endfor %}
+</table></div></section>
+{% endblock %}
