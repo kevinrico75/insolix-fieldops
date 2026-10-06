@@ -134,10 +134,13 @@ def run_bid_scout(c,task):
 
 def run_estimator(c,task):
     from estimator_feature import analyze_project
+    from geometry_feature import scan_project
     pid=task["related_id"]
     created=analyze_project(pid)
-    log_action(c,"INSOLIX Estimator","analyzed estimator project","estimator_project",pid,f"Created {created} new scope/takeoff items. No unverified quantity is auto-approved.")
-    return {"ok":True,"created_items":created}
+    pages=scan_project(pid)
+    log_action(c,"INSOLIX Estimator","analyzed estimator project","estimator_project",pid,
+               f"Created {created} new scope/takeoff items and indexed {pages} blueprint pages for geometry. No unverified quantity is auto-approved.")
+    return {"ok":True,"created_items":created,"geometry_pages":pages}
 
 def run_qa(c,task):
     pid=task["related_id"]
