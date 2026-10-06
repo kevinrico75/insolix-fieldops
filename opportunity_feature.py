@@ -381,6 +381,48 @@ def ingest_bidnet_alert(payload):
         return {"opportunity_id":o["id"] if o else None,"trade":o["trade"] if o else "","match_score":score}
     finally: c.close()
 
+def _bc_value(obj,*paths):
+    for path in paths:
+        cur=obj
+        ok=True
+        for part in path.split("."):
+            if isinstance(cur,dict) and part in cur: cur=cur[part]
+            else: ok=False; break
+        if ok and cur not in (None,"",[]): return cur
+    return ""
+
+def ingest_buildingconnected_opportunity(payload):
+    raw=payload.get("raw") or payload
+    attrs=payload.get("attributes") or (raw.get("attributes") if isinstance(raw,dict) else {}) or {}
+    external_id=str(payload.get("external_id") or payload.get("id") or raw.get("id") or "")
+    title=payload.get("title") or _bc_value(attrs,"name","projectName","title") or "BuildingConnected Opportunity"
+    company=payload.get("company") or _bc_value(attrs,"clientName","companyName","generalContractorName","ownerName")
+    location=payload.get("location") or _bc_value(attrs,"location","projectLocation","address")
+    due=payload.get("due_date") or _bc_value(attrs,"dueDate","bidDueDate","submissionDeadline")
+    status=payload.get("bc_status") or _bc_value(attrs,"status","opportunityStatus")
+    desc=payload.get("description") or _flatten_description(attrs)
+    url=payload.get("url") or _bc_value(attrs,"url","webUrl","buildingConnectedUrl")
+    posted=payload.get("posted_date") or _bc_value(attrs,"createdAt","publishedAt")
+    c=_conn()
+    try:
+        src=c.execute("SELECT id,name FROM opportunity_sources WHERE source_type='buildingconnected' LIMIT 1").fetchone()
+        if not src:
+            c.execute("INSERT INTO opportunity_sources(name,source_type,url,enabled,last_status) VALUES(?,?,?,?,?)",
+                      ("BuildingConnected / Bid Board Pro","buildingconnected","https://app.buildingconnected.com",1,"Connected via Autodesk APS"))
+            src=c.execute("SELECT id,name FROM opportunity_sources WHERE source_type='buildingconnected' LIMIT 1").fetchone()
+        score=upsert_opportunity(c,src["id"],src["name"],external_id or title,title,company,desc,location,"",
+                                 posted,due,status,"",url,estimated_value=0,raw=raw)
+        if score<18:
+            c.execute("""UPDATE opportunities SET trade='Construction Review',match_score=30,
+                       match_reasons='BuildingConnected invitation - review plans/specs for INSOLIX scope'
+                       WHERE source_name=? AND external_id=?""",(src["name"],external_id or title))
+            score=30
+        c.execute("UPDATE opportunity_sources SET last_sync=CURRENT_TIMESTAMP,last_status='BuildingConnected opportunities received' WHERE id=?",(src["id"],))
+        row=c.execute("SELECT id,trade,match_score FROM opportunities WHERE source_name=? AND external_id=?",(src["name"],external_id or title)).fetchone()
+        c.commit()
+        return {"opportunity_id":row["id"] if row else None,"trade":row["trade"] if row else "","match_score":score}
+    finally: c.close()
+
 def _rss_text(node, names):
     for n in names:
         x=node.find(n)
@@ -524,6 +566,16 @@ def install(app):
             raise HTTPException(status_code=401,detail="unauthorized")
         payload=await request.json()
         result=ingest_bidnet_alert(payload)
+        return {"ok":True,**result}
+
+
+    @app.post("/api/buildingconnected/opportunity")
+    async def buildingconnected_opportunity_api(request:Request, x_insolix_ingest_token:str=Header(default="")):
+        expected=os.getenv("INSOLIX_INGEST_TOKEN","").strip()
+        if not expected or not hmac.compare_digest(x_insolix_ingest_token or "",expected):
+            raise HTTPException(status_code=401,detail="unauthorized")
+        payload=await request.json()
+        result=ingest_buildingconnected_opportunity(payload)
         return {"ok":True,**result}
 
     @app.post("/opportunities/sync")
