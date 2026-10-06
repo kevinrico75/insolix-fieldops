@@ -335,13 +335,43 @@ def install(app):
         finally:c.close()
         return RedirectResponse(f"/estimator/{project_id}/geometry/{document_id}/{page_no}",303)
 
+
+    @app.post("/estimator/{project_id}/geometry/{document_id}/{page_no}/polygon")
+    def geometry_polygon(project_id:int,document_id:int,page_no:int,points_json:str=Form(...),
+                         image_width:float=Form(...),image_height:float=Form(...),
+                         trade:str=Form("Insulation"),scope_type:str=Form("Attic / Roof"),assembly:str=Form(""),
+                         source_label:str=Form(""),confidence:int=Form(100),sign:int=Form(1)):
+        c=_conn()
+        try:
+            g=c.execute("SELECT * FROM estimator_geometry_pages WHERE project_id=? AND document_id=? AND page_no=?",(project_id,document_id,page_no)).fetchone()
+            if not g or not g["feet_per_point"]:
+                return RedirectResponse(f"/estimator/{project_id}/geometry/{document_id}/{page_no}?error=no_scale",303)
+            raw=json.loads(points_json or "[]")
+            if not isinstance(raw,list) or len(raw)<3:
+                return RedirectResponse(f"/estimator/{project_id}/geometry/{document_id}/{page_no}?error=polygon",303)
+            pts=_to_pdf_coords([(float(p[0]),float(p[1])) for p in raw],image_width,image_height,g["page_width_pt"],g["page_height_pt"])
+            area_pt2=0.0
+            for i in range(len(pts)):
+                x1,y1=pts[i]; x2,y2=pts[(i+1)%len(pts)]
+                area_pt2 += x1*y2-x2*y1
+            area_ft2=abs(area_pt2)/2.0*(float(g["feet_per_point"])**2)
+            coords={"image":raw,"pdf":[list(p) for p in pts],"image_size":[image_width,image_height]}
+            c.execute("""INSERT INTO estimator_geometry_measurements(project_id,document_id,page_no,sheet_no,measure_type,coords_json,value,unit,sign,
+                       trade,scope_type,assembly,source_label,confidence,verified)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+                     (project_id,document_id,page_no,g["sheet_no"],"polygon",json.dumps(coords),area_ft2,"SF",
+                      -1 if int(sign)<0 else 1,trade,scope_type,assembly,source_label or g["sheet_no"],max(0,min(int(confidence),100))))
+            c.commit()
+        finally:c.close()
+        return RedirectResponse(f"/estimator/{project_id}/geometry/{document_id}/{page_no}",303)
+
     @app.post("/estimator/{project_id}/geometry/{document_id}/{page_no}/measure")
     def geometry_measure(project_id:int,document_id:int,page_no:int,measure_type:str=Form(...),
                          x1:float=Form(...),y1:float=Form(...),x2:float=Form(...),y2:float=Form(...),
                          image_width:float=Form(...),image_height:float=Form(...),
                          trade:str=Form("Insulation"),scope_type:str=Form("Exterior Walls"),assembly:str=Form(""),
-                         source_label:str=Form(""),confidence:int=Form(100)):
-        if measure_type not in ("line","area","opening"): measure_type="line"
+                         source_label:str=Form(""),confidence:int=Form(100),wall_height:float=Form(0)):
+        if measure_type not in ("line","wall_area","area","opening"): measure_type="line"
         c=_conn()
         try:
             g=c.execute("SELECT * FROM estimator_geometry_pages WHERE project_id=? AND document_id=? AND page_no=?",(project_id,document_id,page_no)).fetchone()
@@ -351,6 +381,10 @@ def install(app):
             fpp=float(g["feet_per_point"])
             if measure_type=="line":
                 value=_distance(*pts[0],*pts[1])*fpp; unit="LF"; sign=1
+            elif measure_type=="wall_area":
+                run=_distance(*pts[0],*pts[1])*fpp
+                value=run*max(float(wall_height or 0),0); unit="SF"; sign=1
+                source_label=(source_label or g["sheet_no"])+f" • {run:.1f} LF x {float(wall_height or 0):.1f} ft"
             else:
                 width=abs(pts[1][0]-pts[0][0])*fpp
                 height=abs(pts[1][1]-pts[0][1])*fpp
