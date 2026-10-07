@@ -419,9 +419,20 @@ def ingest_buildingconnected_opportunity(payload):
                        WHERE source_name=? AND external_id=?""",(src["name"],external_id or title))
             score=30
         c.execute("UPDATE opportunity_sources SET last_sync=CURRENT_TIMESTAMP,last_status='BuildingConnected opportunities received' WHERE id=?",(src["id"],))
-        row=c.execute("SELECT id,trade,match_score FROM opportunities WHERE source_name=? AND external_id=?",(src["name"],external_id or title)).fetchone()
+        row=c.execute("SELECT id,trade,match_score,title,agency,location,due_date,url FROM opportunities WHERE source_name=? AND external_id=?",(src["name"],external_id or title)).fetchone()
+        estimator_project_id=None
+        if row:
+            c.execute("""INSERT INTO estimator_projects(opportunity_id,title,source_name,source_url,company,location,due_date,status)
+                         VALUES(?,?,?,?,?,?,?,'Document Review')
+                         ON CONFLICT(opportunity_id) DO UPDATE SET title=excluded.title,source_name=excluded.source_name,
+                         source_url=excluded.source_url,company=excluded.company,location=excluded.location,due_date=excluded.due_date,
+                         updated_at=CURRENT_TIMESTAMP""",
+                      (row["id"],row["title"],src["name"],row["url"],row["agency"],row["location"],row["due_date"]))
+            p=c.execute("SELECT id FROM estimator_projects WHERE opportunity_id=?",(row["id"],)).fetchone()
+            estimator_project_id=p["id"] if p else None
         c.commit()
-        return {"opportunity_id":row["id"] if row else None,"trade":row["trade"] if row else "","match_score":score}
+        return {"opportunity_id":row["id"] if row else None,"trade":row["trade"] if row else "","match_score":score,
+                "estimator_project_id":estimator_project_id}
     finally: c.close()
 
 def _rss_text(node, names):
