@@ -72,6 +72,13 @@ def init_agent_db():
           detail TEXT,
           created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS agent_health_checks(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          severity TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          details_json TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS estimator_qa_reviews(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           project_id INTEGER NOT NULL,
@@ -185,6 +192,69 @@ def run_coordinator(c,task):
     log_action(c,"Project Coordinator","reviewed project coordination task",task["related_type"] or "",task["related_id"],detail)
     return {"ok":True,"status":"Reviewed"}
 
+def run_watchdog():
+    c=_conn()
+    try:
+        findings=[]
+        severity="OK"
+        rows=c.execute("""SELECT a.name,
+          SUM(CASE WHEN t.status='Queued' THEN 1 ELSE 0 END) queued,
+          SUM(CASE WHEN t.status='Running' THEN 1 ELSE 0 END) running,
+          SUM(CASE WHEN t.status='Failed' THEN 1 ELSE 0 END) failed,
+          SUM(CASE WHEN t.status='Completed' THEN 1 ELSE 0 END) completed
+          FROM agent_identities a LEFT JOIN agent_tasks t ON t.agent_id=a.id
+          GROUP BY a.id ORDER BY a.id""").fetchall()
+        stats={r["name"]:{"queued":int(r["queued"] or 0),"running":int(r["running"] or 0),
+                          "failed":int(r["failed"] or 0),"completed":int(r["completed"] or 0)} for r in rows}
+
+        scout=stats.get("Bid Scout",{})
+        est=stats.get("INSOLIX Estimator",{})
+        qa=stats.get("QA Auditor",{})
+
+        if scout.get("queued",0)>100 and est.get("queued",0)==0 and qa.get("queued",0)==0:
+            findings.append("Pipeline imbalance: Bid Scout has a large queue while Estimator and QA are idle.")
+            severity="CRITICAL"
+        elif scout.get("queued",0)>75 and est.get("queued",0)<3:
+            findings.append("High Bid Scout backlog with very little estimator handoff.")
+            severity="WARNING"
+
+        failed=sum(v.get("failed",0) for v in stats.values())
+        if failed:
+            findings.append(str(failed)+" agent task(s) have failed.")
+            if severity=="OK": severity="WARNING"
+
+        stalled=c.execute("""SELECT COUNT(*) n FROM agent_tasks
+          WHERE status='Running' AND started_at IS NOT NULL
+          AND datetime(started_at) < datetime('now','-30 minutes')""").fetchone()["n"]
+        if stalled:
+            findings.append(str(stalled)+" task(s) have been running for more than 30 minutes.")
+            severity="CRITICAL"
+
+        bc_pending=c.execute("""SELECT COUNT(*) n FROM opportunities o
+          WHERE o.source_name LIKE 'BuildingConnected%'
+          AND o.status IN ('New','Saved','Passed')
+          AND NOT EXISTS(SELECT 1 FROM estimator_projects p WHERE p.opportunity_id=o.id)""").fetchone()["n"]
+        if bc_pending:
+            findings.append(str(bc_pending)+" BuildingConnected opportunity(ies) have not reached Estimator.")
+            if bc_pending>=5: severity="CRITICAL"
+            elif severity=="OK": severity="WARNING"
+
+        no_docs=c.execute("""SELECT COUNT(*) n FROM estimator_projects p
+          WHERE p.status NOT IN ('Estimate Created','Complete')
+          AND NOT EXISTS(SELECT 1 FROM estimator_documents d WHERE d.project_id=p.id)""").fetchone()["n"]
+        if no_docs:
+            findings.append(str(no_docs)+" estimator project(s) are waiting for bid documents.")
+            if severity=="OK": severity="WARNING"
+
+        summary="All monitored INSOLIX pipelines look normal." if not findings else " | ".join(findings[:4])
+        c.execute("INSERT INTO agent_health_checks(severity,summary,details_json) VALUES(?,?,?)",
+                  (severity,summary,json.dumps({"findings":findings,"stats":stats})))
+        log_action(c,"System Watchdog","pipeline health check","system",None,severity+": "+summary)
+        c.execute("UPDATE agent_identities SET last_run_at=CURRENT_TIMESTAMP WHERE name='System Watchdog'")
+        c.commit()
+        return {"severity":severity,"summary":summary,"findings":findings}
+    finally:c.close()
+
 def run_one_task(task_id):
     c=_conn()
     try:
@@ -204,6 +274,7 @@ def run_one_task(task_id):
     finally:c.close()
 
 def run_queue(limit=25):
+    run_watchdog()
     seed_current_work()
     c=_conn()
     try:
@@ -229,8 +300,9 @@ def install(app):
                 perms[a["id"]]=[r["permission"] for r in c.execute("SELECT permission FROM agent_permissions WHERE agent_id=? ORDER BY permission",(a["id"],)).fetchall()]
             tasks=c.execute("""SELECT t.*,a.name agent_name FROM agent_tasks t JOIN agent_identities a ON a.id=t.agent_id ORDER BY t.id DESC LIMIT 100""").fetchall()
             audit=c.execute("SELECT * FROM agent_audit_log ORDER BY id DESC LIMIT 100").fetchall()
+            health=c.execute("SELECT * FROM agent_health_checks ORDER BY id DESC LIMIT 20").fetchall()
         finally:c.close()
-        return templates.TemplateResponse("agents.html",{"request":request,"agents":agents,"perms":perms,"tasks":tasks,"audit":audit})
+        return templates.TemplateResponse("agents.html",{"request":request,"agents":agents,"perms":perms,"tasks":tasks,"audit":audit,"health":health})
 
     @app.post("/agents/run")
     def agents_run():
