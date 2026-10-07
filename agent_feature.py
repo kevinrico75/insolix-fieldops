@@ -158,6 +158,22 @@ def seed_current_work():
                               )
                               GROUP BY x.project_id HAVING COUNT(*)>0""").fetchall():
             enqueue(c,"QA Auditor","audit_takeoff","estimator_project",p["project_id"],70)
+        # Coordinator: queue projects that passed QA for human-review handoff.
+        for p in c.execute("""SELECT p.id FROM estimator_projects p
+                              WHERE EXISTS(
+                                SELECT 1 FROM estimator_qa_reviews q
+                                WHERE q.project_id=p.id AND q.status LIKE 'PASS%'
+                              )
+                              AND NOT EXISTS(
+                                SELECT 1 FROM agent_tasks t
+                                JOIN agent_identities a ON a.id=t.agent_id
+                                WHERE a.name='Project Coordinator'
+                                  AND t.task_type='prepare_human_review'
+                                  AND t.related_type='estimator_project'
+                                  AND t.related_id=p.id
+                                  AND t.status IN ('Queued','Running','Completed')
+                              )""").fetchall():
+            enqueue(c,"Project Coordinator","prepare_human_review","estimator_project",p["id"],65)
         c.commit()
     finally:c.close()
 
@@ -222,9 +238,20 @@ def run_qa(c,task):
     return {"ok":True,"status":status,"score":score,"findings":findings}
 
 def run_coordinator(c,task):
-    detail="Reviewed handoff state; no external send/submission action permitted."
-    log_action(c,"Project Coordinator","reviewed project coordination task",task["related_type"] or "",task["related_id"],detail)
-    return {"ok":True,"status":"Reviewed"}
+    pid=task["related_id"]
+    p=c.execute("SELECT * FROM estimator_projects WHERE id=?",(pid,)).fetchone()
+    if not p:
+        return {"ok":False,"error":"estimator project missing"}
+    qa=c.execute("SELECT * FROM estimator_qa_reviews WHERE project_id=? ORDER BY id DESC LIMIT 1",(pid,)).fetchone()
+    if qa and str(qa["status"] or "").startswith("PASS"):
+        c.execute("UPDATE estimator_projects SET status='Ready for Human Review',updated_at=CURRENT_TIMESTAMP WHERE id=?",(pid,))
+        detail="QA passed. Project moved to Ready for Human Review. No bid was sent or approved."
+        status="Ready for Human Review"
+    else:
+        detail="Coordinator checked handoff but QA has not passed. No external action taken."
+        status="Waiting for QA"
+    log_action(c,"Project Coordinator","reviewed project coordination task","estimator_project",pid,detail)
+    return {"ok":True,"status":status}
 
 def run_watchdog():
     c=_conn()
