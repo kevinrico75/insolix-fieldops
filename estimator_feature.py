@@ -26,6 +26,8 @@ def init_estimator_db():
           status TEXT DEFAULT 'Document Review',
           revision TEXT DEFAULT 'Base Bid',
           notes TEXT,
+          document_access_status TEXT,
+          document_access_note TEXT,
           created_at TEXT DEFAULT CURRENT_TIMESTAMP,
           updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
@@ -91,6 +93,10 @@ def init_estimator_db():
         c.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_estimator_document_source
                      ON estimator_documents(project_id,source_provider,source_ref)
                      WHERE source_ref IS NOT NULL""")
+        pcols={r["name"] for r in c.execute("PRAGMA table_info(estimator_projects)").fetchall()}
+        for name,typ in [("document_access_status","TEXT"),("document_access_note","TEXT")]:
+            if name not in pcols:
+                c.execute(f"ALTER TABLE estimator_projects ADD COLUMN {name} {typ}")
         c.commit()
     finally: c.close()
 
