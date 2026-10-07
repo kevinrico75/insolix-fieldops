@@ -1,8 +1,8 @@
-from fastapi import Request, Form, UploadFile, File
+from fastapi import Request, Form, UploadFile, File, Header, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pypdf import PdfReader
-import sqlite3, os, re, json, shutil, uuid, io
+import sqlite3, os, re, json, shutil, uuid, io, urllib.request, urllib.error, hmac
 
 BASE=os.path.dirname(__file__)
 DATA_DIR=os.environ.get("INSOLIX_DATA_DIR",BASE)
@@ -38,6 +38,9 @@ def init_estimator_db():
           revision_label TEXT DEFAULT 'Base Bid',
           page_count INTEGER DEFAULT 0,
           extracted_text TEXT,
+          source_ref TEXT,
+          source_provider TEXT,
+          source_url TEXT,
           created_at TEXT DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY(project_id) REFERENCES estimator_projects(id) ON DELETE CASCADE
         );
@@ -79,8 +82,13 @@ def init_estimator_db():
           FOREIGN KEY(project_id) REFERENCES estimator_projects(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_estimator_project ON estimator_takeoff_items(project_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_estimator_document_source ON estimator_documents(project_id,source_provider,source_ref) WHERE source_ref IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_estimator_trade ON estimator_takeoff_items(trade);
         """)
+        cols={r["name"] for r in c.execute("PRAGMA table_info(estimator_documents)").fetchall()}
+        for name,typ in [("source_ref","TEXT"),("source_provider","TEXT"),("source_url","TEXT")]:
+            if name not in cols:
+                c.execute(f"ALTER TABLE estimator_documents ADD COLUMN {name} {typ}")
         c.commit()
     finally: c.close()
 
@@ -108,6 +116,24 @@ def _extract_pdf(data):
         if txt.strip():
             parts.append(f"\n--- PAGE {i} ---\n"+txt)
     return "\n".join(parts)[:3000000],len(reader.pages)
+
+def _bc_doc_type(filename):
+    low=(filename or "").lower()
+    if any(x in low for x in ("addendum","addenda","bulletin","asi")): return "Addendum"
+    if any(x in low for x in ("spec","project manual","specification")): return "Specifications"
+    if any(x in low for x in ("bid instruction","invitation","itb")): return "Bid Instructions"
+    return "Plans"
+
+def _download_document(url,max_bytes=80*1024*1024):
+    req=urllib.request.Request(url,headers={"User-Agent":"INSOLIX-Estimator/1.0"})
+    with urllib.request.urlopen(req,timeout=90) as r:
+        length=int(r.headers.get("Content-Length") or 0)
+        if length and length>max_bytes:
+            raise RuntimeError("document exceeds 80 MB ingest limit")
+        data=r.read(max_bytes+1)
+        if len(data)>max_bytes:
+            raise RuntimeError("document exceeds 80 MB ingest limit")
+        return data
 
 def _extract_text(filename,data):
     low=filename.lower()
@@ -243,6 +269,57 @@ def install(app):
             addenda=c.execute("SELECT * FROM estimator_addenda WHERE project_id=? ORDER BY id DESC",(project_id,)).fetchall()
         finally:c.close()
         return templates.TemplateResponse("estimator_project.html",{"request":request,"p":p,"docs":docs,"items":items,"grouped":grouped,"pricebook":pb,"addenda":addenda})
+
+    @app.post("/api/buildingconnected/document")
+    async def buildingconnected_document_api(request:Request, x_insolix_ingest_token:str=Header(default="")):
+        expected=os.getenv("INSOLIX_INGEST_TOKEN","").strip()
+        if not expected or not hmac.compare_digest(x_insolix_ingest_token or "",expected):
+            raise HTTPException(status_code=401,detail="unauthorized")
+        payload=await request.json()
+        external_id=str(payload.get("opportunity_external_id") or "").strip()
+        filename=(payload.get("filename") or "BuildingConnected-document.pdf").replace("/","_").replace("\\","_")
+        source_ref=str(payload.get("source_ref") or payload.get("version_id") or payload.get("item_id") or filename)
+        download_url=str(payload.get("download_url") or "")
+        if not external_id or not download_url:
+            raise HTTPException(status_code=400,detail="missing opportunity_external_id or download_url")
+        c=_conn()
+        try:
+            o=c.execute("""SELECT * FROM opportunities WHERE source_name LIKE 'BuildingConnected%' AND external_id=? ORDER BY id DESC LIMIT 1""",
+                        (external_id,)).fetchone()
+            if not o:
+                raise HTTPException(status_code=404,detail="BuildingConnected opportunity not found in INSOLIX")
+            c.execute("""INSERT INTO estimator_projects(opportunity_id,title,source_name,source_url,company,location,due_date,status)
+                         VALUES(?,?,?,?,?,?,?,'Document Review')
+                         ON CONFLICT(opportunity_id) DO UPDATE SET updated_at=CURRENT_TIMESTAMP""",
+                      (o["id"],o["title"],o["source_name"],o["url"],o["agency"],o["location"],o["due_date"]))
+            p=c.execute("SELECT id FROM estimator_projects WHERE opportunity_id=?",(o["id"],)).fetchone()
+            existing=c.execute("""SELECT id,filename FROM estimator_documents WHERE project_id=? AND source_provider='BuildingConnected'
+                                  AND source_ref=?""",(p["id"],source_ref)).fetchone()
+            if existing:
+                return {"ok":True,"duplicate":True,"document_id":existing["id"],"project_id":p["id"]}
+        finally:c.close()
+
+        try:
+            data=_download_document(download_url)
+            text,pages=_extract_text(filename,data)
+        except Exception as e:
+            raise HTTPException(status_code=502,detail=("document download/extract failed: "+str(e))[:500])
+
+        stored=f"{p['id']}_{uuid.uuid4().hex}_{filename}"
+        path=os.path.join(UPLOAD_ROOT,stored)
+        with open(path,"wb") as fh: fh.write(data)
+        c=_conn()
+        try:
+            c.execute("""INSERT INTO estimator_documents(project_id,filename,stored_name,doc_type,revision_label,page_count,extracted_text,
+                         source_ref,source_provider,source_url)
+                         VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                      (p["id"],filename,stored,_bc_doc_type(filename),payload.get("revision_label") or "Base Bid",pages,text,
+                       source_ref,"BuildingConnected",payload.get("source_web_url") or ""))
+            did=c.execute("SELECT last_insert_rowid() id").fetchone()["id"]
+            c.execute("UPDATE estimator_projects SET status='Documents Received',updated_at=CURRENT_TIMESTAMP WHERE id=?",(p["id"],))
+            c.commit()
+            return {"ok":True,"duplicate":False,"document_id":did,"project_id":p["id"],"pages":pages,"bytes":len(data)}
+        finally:c.close()
 
     @app.post("/estimator/{project_id}/documents")
     async def estimator_upload(project_id:int,file:UploadFile=File(...),doc_type:str=Form("Plans"),revision_label:str=Form("Base Bid")):
