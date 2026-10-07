@@ -6,17 +6,26 @@
 {% if request.query_params.get('analyzed') is not none %}<div class="notice success">AI scope scan created {{request.query_params.get('analyzed')}} new takeoff items. Quantities without explicit plan/spec evidence remain marked Needs Measurement.</div>{% endif %}
 {% if request.query_params.get('estimate_error') %}<div class="notice">No verified non-zero quantities are ready to send to an estimate yet.</div>{% endif %}
 {% if request.query_params.get('geometry_scanned') %}<div class="notice success">Blueprint geometry scan indexed {{request.query_params.get('geometry_scanned')}} plan pages. Open Blueprint Geometry Takeoff to measure/verify sheets.</div>{% endif %}
+{% if request.query_params.get('batch_uploaded') %}<div class="notice success">Bid package intake: {{request.query_params.get('batch_uploaded')}} files accepted, {{request.query_params.get('batch_skipped') or 0}} skipped, {{request.query_params.get('batch_pages') or 0}} PDF pages processed.</div>{% endif %}
 
 <div class="grid2">
 <section class="card">
   <div class="section-title"><h2>Bid Documents</h2><form method="post" action="/estimator/{{p.id}}/analyze"><button>Analyze Documents</button></form></div>
   <p class="muted">Upload plans, specifications and addenda. PDF text is extracted and scanned for INSOLIX scope, material requirements, R-values and explicit quantities.</p>
+  <form method="post" action="/estimator/{{p.id}}/documents/batch" enctype="multipart/form-data" style="margin-bottom:14px">
+    <h3>Upload Entire Bid Package</h3>
+    <p class="muted">Select multiple files or a BuildingConnected ZIP download. INSOLIX will unpack supported files, classify them, extract plan/spec text, run scope analysis, and index blueprint geometry automatically.</p>
+    <div class="row"><label>Bid Package / Files<input type="file" name="files" multiple required></label>
+    <label>Revision / Addendum<input name="revision_label" value="Base Bid" placeholder="Base Bid or Addendum 3"></label></div>
+    <button>Upload + Analyze Package</button>
+  </form>
+  <details><summary>Upload one document manually</summary>
   <form method="post" action="/estimator/{{p.id}}/documents" enctype="multipart/form-data">
     <div class="row"><label>Document<input type="file" name="file" required></label>
     <label>Type<select name="doc_type"><option>Plans</option><option>Specifications</option><option>Addendum</option><option>Bid Instructions</option></select></label>
     <label>Revision / Addendum<input name="revision_label" value="Base Bid" placeholder="Base Bid or Addendum 3"></label></div>
     <button>Upload</button>
-  </form>
+  </form></details>
   {% for d in docs %}<div class="workorder"><div><b>{{d.filename}}</b><small>{{d.doc_type}} • {{d.revision_label}} • {{d.page_count}} pages</small></div></div>{% else %}<p class="muted">No bid documents uploaded yet.</p>{% endfor %}
 </section>
 <section class="card">
