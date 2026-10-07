@@ -168,9 +168,23 @@ def run_bid_scout(c,task):
     score=int(o["match_score"] or 0)
     source=o["source_name"] or ""
     decision="High Priority" if score>=55 else ("Review Plans" if source.startswith("BuildingConnected") or o["trade"]=="Construction Review" else "Standard Review")
+    estimator_project_id=None
+    if source.startswith("BuildingConnected") or score>=55:
+        c.execute("""INSERT INTO estimator_projects(opportunity_id,title,source_name,source_url,company,location,due_date,status)
+                     VALUES(?,?,?,?,?,?,?,'Document Review')
+                     ON CONFLICT(opportunity_id) DO UPDATE SET
+                       title=excluded.title,source_name=excluded.source_name,source_url=excluded.source_url,
+                       company=excluded.company,location=excluded.location,due_date=excluded.due_date,
+                       updated_at=CURRENT_TIMESTAMP""",
+                  (oid,o["title"],o["source_name"],o["url"],o["agency"],o["location"],o["due_date"]))
+        p=c.execute("SELECT id FROM estimator_projects WHERE opportunity_id=?",(oid,)).fetchone()
+        estimator_project_id=p["id"] if p else None
+        c.execute("UPDATE opportunities SET status='Passed' WHERE id=?",(oid,))
     detail=f"{decision}: {o['trade'] or 'Unclassified'} at {score}% from {source}"
+    if estimator_project_id:
+        detail += f"; estimator project #{estimator_project_id} created/updated"
     log_action(c,"Bid Scout","triaged opportunity","opportunity",oid,detail)
-    return {"ok":True,"decision":decision,"score":score}
+    return {"ok":True,"decision":decision,"score":score,"estimator_project_id":estimator_project_id}
 
 def run_estimator(c,task):
     from estimator_feature import analyze_project
