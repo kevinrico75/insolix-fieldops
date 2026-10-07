@@ -2,7 +2,7 @@ from fastapi import Request, Form, UploadFile, File, Header, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pypdf import PdfReader
-import sqlite3, os, re, json, shutil, uuid, io, urllib.request, urllib.error, hmac
+import sqlite3, os, re, json, shutil, uuid, io, urllib.request, urllib.error, hmac, zipfile
 
 BASE=os.path.dirname(__file__)
 DATA_DIR=os.environ.get("INSOLIX_DATA_DIR",BASE)
@@ -136,6 +136,27 @@ def _download_document(url,max_bytes=80*1024*1024):
         if len(data)>max_bytes:
             raise RuntimeError("document exceeds 80 MB ingest limit")
         return data
+
+def _store_estimator_document(project_id,filename,data,doc_type=None,revision_label="Base Bid",source_provider=None,source_ref=None,source_url=None):
+    safe=(filename or "document").replace("/","_").replace("\\","_")[:240]
+    stored=f"{project_id}_{uuid.uuid4().hex}_{safe}"
+    path=os.path.join(UPLOAD_ROOT,stored)
+    with open(path,"wb") as f:f.write(data)
+    text,pages=_extract_text(safe,data)
+    c=_conn()
+    try:
+        c.execute("""INSERT INTO estimator_documents(project_id,filename,stored_name,doc_type,revision_label,page_count,extracted_text,
+                     source_ref,source_provider,source_url) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                  (project_id,safe,stored,doc_type or _bc_doc_type(safe),revision_label,pages,text,
+                   source_ref,source_provider,source_url))
+        did=c.execute("SELECT last_insert_rowid() id").fetchone()["id"]
+        if (revision_label or "").lower() not in ("base bid","original",""):
+            c.execute("INSERT INTO estimator_addenda(project_id,label,summary) VALUES(?,?,?)",
+                      (project_id,revision_label,f"Uploaded {safe}; pending impact analysis."))
+        c.execute("UPDATE estimator_projects SET status='Documents Received',updated_at=CURRENT_TIMESTAMP WHERE id=?",(project_id,))
+        c.commit()
+        return did,pages
+    finally:c.close()
 
 def _extract_text(filename,data):
     low=filename.lower()
@@ -341,6 +362,50 @@ def install(app):
             c.commit()
         finally:c.close()
         return RedirectResponse(f"/estimator/{project_id}",303)
+
+    @app.post("/estimator/{project_id}/documents/batch")
+    async def estimator_batch_upload(project_id:int,files:list[UploadFile]=File(...),revision_label:str=Form("Base Bid")):
+        allowed=(".pdf",".txt",".rtf",".doc",".docx",".xls",".xlsx",".dwg",".dxf")
+        accepted=0; skipped=0; pages=0
+        for up in files[:100]:
+            name=up.filename or "document"
+            data=await up.read()
+            if name.lower().endswith(".zip"):
+                try:
+                    z=zipfile.ZipFile(io.BytesIO(data))
+                    total_uncompressed=0
+                    for zi in z.infolist()[:500]:
+                        if zi.is_dir(): continue
+                        inner=os.path.basename(zi.filename)
+                        if not inner or not inner.lower().endswith(allowed): continue
+                        if zi.file_size>80*1024*1024: skipped+=1; continue
+                        total_uncompressed+=zi.file_size
+                        if total_uncompressed>500*1024*1024: break
+                        raw=z.read(zi)
+                        try:
+                            _,pg=_store_estimator_document(project_id,inner,raw,revision_label=revision_label)
+                            accepted+=1; pages+=pg
+                        except Exception:
+                            skipped+=1
+                except Exception:
+                    skipped+=1
+            elif name.lower().endswith(allowed):
+                try:
+                    _,pg=_store_estimator_document(project_id,name,data,revision_label=revision_label)
+                    accepted+=1; pages+=pg
+                except Exception:
+                    skipped+=1
+            else:
+                skipped+=1
+        created=0; geom_pages=0
+        if accepted:
+            try:
+                created=analyze_project(project_id)
+                from geometry_feature import scan_project
+                geom_pages=scan_project(project_id)
+            except Exception:
+                pass
+        return RedirectResponse(f"/estimator/{project_id}?batch_uploaded={accepted}&batch_skipped={skipped}&batch_pages={pages}&analyzed={created}&geometry_scanned={geom_pages}",303)
 
     @app.post("/estimator/{project_id}/analyze")
     def estimator_analyze(project_id:int):
