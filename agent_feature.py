@@ -13,14 +13,16 @@ AGENTS=[
  ("Bid Scout","Opportunity Scout","Finds and triages construction opportunities. Cannot price, submit, invoice, or change company settings."),
  ("INSOLIX Estimator","Estimator Agent","Reads bid documents, builds draft takeoffs, maps pricebook items, and creates draft estimates only."),
  ("QA Auditor","QA Agent","Challenges estimator output, flags missing evidence, conflicting scope, low confidence, and incomplete measurements."),
- ("Project Coordinator","Coordinator Agent","Tracks approved project handoff, addenda, due dates, and follow-up tasks. Cannot submit bids or touch accounting.")
+ ("Project Coordinator","Coordinator Agent","Tracks approved project handoff, addenda, due dates, and follow-up tasks. Cannot submit bids or touch accounting."),
+ ("System Watchdog","Operations Watchdog","Supervises agent health, queue balance, stalled handoffs, failed tasks, and pipeline progression.")
 ]
 
 PERMISSIONS={
  "Bid Scout":["opportunity.read","opportunity.triage","estimator.create_project","task.create"],
  "INSOLIX Estimator":["opportunity.read","document.read","document.analyze","takeoff.create","takeoff.update","pricebook.read","estimate.create_draft","estimate.update_draft","task.create"],
  "QA Auditor":["opportunity.read","document.read","takeoff.read","estimate.read","qa.review","task.create"],
- "Project Coordinator":["opportunity.read","estimator.read","estimate.read","addenda.track","task.create","lead.read"]
+ "Project Coordinator":["opportunity.read","estimator.read","estimate.read","addenda.track","task.create","lead.read"],
+ "System Watchdog":["agent.read","task.read","pipeline.health","task.create","alert.create"]
 }
 
 def _conn():
@@ -108,8 +110,19 @@ def enqueue(c,agent_name,task_type,related_type="",related_id=None,priority=50,p
 def seed_current_work():
     c=_conn()
     try:
-        # Bid Scout: every new/saved opportunity not yet passed/converted gets a triage task.
-        for o in c.execute("SELECT id,source_name,match_score FROM opportunities WHERE status IN ('New','Saved') ORDER BY match_score DESC,id DESC LIMIT 200").fetchall():
+        # Bid Scout: queue only opportunities that have never completed triage.
+        for o in c.execute("""SELECT o.id,o.source_name,o.match_score FROM opportunities o
+                              WHERE o.status IN ('New','Saved')
+                              AND NOT EXISTS(
+                                SELECT 1 FROM agent_tasks t
+                                JOIN agent_identities a ON a.id=t.agent_id
+                                WHERE a.name='Bid Scout'
+                                  AND t.task_type='triage_opportunity'
+                                  AND t.related_type='opportunity'
+                                  AND t.related_id=o.id
+                                  AND t.status='Completed'
+                              )
+                              ORDER BY o.match_score DESC,o.id DESC LIMIT 200""").fetchall():
             enqueue(c,"Bid Scout","triage_opportunity","opportunity",o["id"],80 if "BuildingConnected" in (o["source_name"] or "") else 50)
         # Estimator: any estimator project with documents gets an analysis task.
         for p in c.execute("""SELECT p.id,COUNT(d.id) docs FROM estimator_projects p LEFT JOIN estimator_documents d ON d.project_id=p.id
