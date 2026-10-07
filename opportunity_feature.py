@@ -430,6 +430,17 @@ def ingest_buildingconnected_opportunity(payload):
                       (row["id"],row["title"],src["name"],row["url"],row["agency"],row["location"],row["due_date"]))
             p=c.execute("SELECT id FROM estimator_projects WHERE opportunity_id=?",(row["id"],)).fetchone()
             estimator_project_id=p["id"] if p else None
+            ctx=payload.get("bc_context") or {}
+            access=str(ctx.get("document_access") or "unknown")
+            note=""
+            if access=="no_project_pair":
+                note="BuildingConnected opportunity imported, but Autodesk did not expose a linked BuildingConnected Pro project pair/document folder for this Bid Board opportunity. Upload the bid package to continue automated plan takeoff."
+            elif access=="acc_docs_linked":
+                note="Linked Autodesk Docs folder detected; INSOLIX will attempt automatic bid-document import."
+            elif access in ("pair_lookup_unavailable","context_error"):
+                note="BuildingConnected project/document lookup was unavailable during the last sync; Forge will retry automatically."
+            c.execute("""UPDATE estimator_projects SET document_access_status=?,document_access_note=?,updated_at=CURRENT_TIMESTAMP
+                         WHERE id=?""",(access,note,estimator_project_id))
         c.commit()
         return {"opportunity_id":row["id"] if row else None,"trade":row["trade"] if row else "","match_score":score,
                 "estimator_project_id":estimator_project_id}
