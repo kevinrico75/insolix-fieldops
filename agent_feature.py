@@ -336,12 +336,13 @@ def install(app):
             audit=c.execute("SELECT * FROM agent_audit_log ORDER BY id DESC LIMIT 100").fetchall()
             health=c.execute("SELECT * FROM agent_health_checks ORDER BY id DESC LIMIT 20").fetchall()
             pipeline=c.execute("""SELECT o.id opportunity_id,o.title,o.source_name,o.trade,o.match_score,o.due_date,
-                p.id project_id,p.status project_status,
+                p.id project_id,p.status project_status,p.document_access_status,p.document_access_note,
                 (SELECT COUNT(*) FROM estimator_documents d WHERE d.project_id=p.id) doc_count,
                 (SELECT COUNT(*) FROM estimator_takeoff_items x WHERE x.project_id=p.id) takeoff_count,
                 (SELECT q.status FROM estimator_qa_reviews q WHERE q.project_id=p.id ORDER BY q.id DESC LIMIT 1) qa_status,
                 CASE
                   WHEN p.id IS NULL THEN 'Awaiting Estimator Handoff'
+                  WHEN (SELECT COUNT(*) FROM estimator_documents d WHERE d.project_id=p.id)=0 AND p.document_access_status='no_project_pair' THEN 'Plan Package Required'
                   WHEN (SELECT COUNT(*) FROM estimator_documents d WHERE d.project_id=p.id)=0 THEN 'Waiting for Bid Documents'
                   WHEN (SELECT COUNT(*) FROM estimator_takeoff_items x WHERE x.project_id=p.id)=0 THEN 'Estimator Processing'
                   WHEN (SELECT COUNT(*) FROM estimator_qa_reviews q WHERE q.project_id=p.id)=0 THEN 'Waiting for QA'
