@@ -7,6 +7,7 @@
 {% if request.query_params.get('estimate_error') %}<div class="notice">No verified non-zero quantities are ready to send to an estimate yet.</div>{% endif %}
 {% if request.query_params.get('geometry_scanned') %}<div class="notice success">Blueprint geometry scan indexed {{request.query_params.get('geometry_scanned')}} plan pages. Open Blueprint Geometry Takeoff to measure/verify sheets.</div>{% endif %}
 {% if request.query_params.get('batch_uploaded') %}<div class="notice success">Bid package intake: {{request.query_params.get('batch_uploaded')}} files accepted, {{request.query_params.get('batch_skipped') or 0}} skipped, {{request.query_params.get('batch_pages') or 0}} PDF pages processed.</div>{% endif %}
+{% if p.document_access_note and docs|length==0 %}<div class="notice"><b>BuildingConnected document status:</b> {{p.document_access_note}}</div>{% endif %}
 
 <div class="grid2">
 <section class="card">
