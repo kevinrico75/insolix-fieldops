@@ -27,6 +27,20 @@
 </section>
 {% endfor %}
 </div>
+<section class="card"><h2>BuildingConnected Pipeline</h2>
+<p class="muted">This is the live handoff view from opportunity intake through documents, estimating, takeoff, QA, and human review.</p>
+<div class="table-wrap"><table>
+<tr><th>Project</th><th>Trade</th><th>Due</th><th>Stage</th><th>Documents</th><th>Takeoff</th><th>QA</th><th></th></tr>
+{% for j in pipeline %}
+<tr>
+<td><b>{{j.title}}</b><br><small>{{j.source_name}} • Match {{j.match_score}}%</small></td>
+<td>{{j.trade or 'Unclassified'}}</td><td>{{j.due_date or '—'}}</td>
+<td><span class="status">{{j.pipeline_stage}}</span></td><td>{{j.doc_count or 0}}</td><td>{{j.takeoff_count or 0}}</td><td>{{j.qa_status or '—'}}</td>
+<td>{% if j.project_id %}<a class="smallbtn" href="/estimator/{{j.project_id}}">Open Estimator</a>{% else %}<a class="smallbtn" href="/opportunities">Open Opportunity</a>{% endif %}</td>
+</tr>
+{% else %}<tr><td colspan="8" class="empty">No BuildingConnected opportunities have reached INSOLIX yet.</td></tr>{% endfor %}
+</table></div></section>
+
 <section class="card"><h2>Task Queue</h2><div class="table-wrap"><table>
 <tr><th>ID</th><th>Agent</th><th>Task</th><th>Related</th><th>Status</th><th>Created</th></tr>
 {% for t in tasks %}<tr><td>#{{t.id}}</td><td>{{t.agent_name}}</td><td>{{t.task_type}}</td><td>{{t.related_type or '—'}} #{{t.related_id or '—'}}</td><td><span class="status">{{t.status}}</span></td><td>{{t.created_at[:16]}}</td></tr>
