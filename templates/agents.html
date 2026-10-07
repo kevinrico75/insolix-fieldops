@@ -8,6 +8,14 @@
 <div class="section-title"><h2>Agent Control</h2><form method="post" action="/agents/run"><button>Run AI Team Now</button></form></div>
 <p class="muted">Agents may analyze, triage, build takeoffs, create draft estimates, and flag issues. They cannot send bids, change pricebook rules, modify company settings, touch QuickBooks credentials, send invoices, collect/refund payments, or approve their own work.</p>
 </section>
+<section class="card">
+<div class="section-title"><h2>System Health</h2>
+{% if health %}<span class="status">{{health[0].severity}}</span>{% endif %}</div>
+{% if health %}
+<p><b>{{health[0].summary}}</b></p>
+<small>Last watchdog check: {{health[0].created_at[:16]}}</small>
+{% else %}<p class="muted">Watchdog has not completed its first health check yet.</p>{% endif %}
+</section>
 <div class="grid2">
 {% for a in agents %}
 <section class="card">
