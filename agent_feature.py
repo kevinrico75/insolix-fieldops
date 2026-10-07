@@ -131,12 +131,32 @@ def seed_current_work():
                               )
                               ORDER BY o.match_score DESC,o.id DESC LIMIT 200""").fetchall():
             enqueue(c,"Bid Scout","triage_opportunity","opportunity",o["id"],80 if "BuildingConnected" in (o["source_name"] or "") else 50)
-        # Estimator: any estimator project with documents gets an analysis task.
-        for p in c.execute("""SELECT p.id,COUNT(d.id) docs FROM estimator_projects p LEFT JOIN estimator_documents d ON d.project_id=p.id
+        # Estimator: queue each estimator project once per available document set.
+        for p in c.execute("""SELECT p.id,COUNT(d.id) docs FROM estimator_projects p
+                              LEFT JOIN estimator_documents d ON d.project_id=p.id
+                              WHERE NOT EXISTS(
+                                SELECT 1 FROM agent_tasks t
+                                JOIN agent_identities a ON a.id=t.agent_id
+                                WHERE a.name='INSOLIX Estimator'
+                                  AND t.task_type='analyze_project_documents'
+                                  AND t.related_type='estimator_project'
+                                  AND t.related_id=p.id
+                                  AND t.status='Completed'
+                              )
                               GROUP BY p.id HAVING COUNT(d.id)>0""").fetchall():
             enqueue(c,"INSOLIX Estimator","analyze_project_documents","estimator_project",p["id"],75)
-        # QA: estimator projects with takeoff items get QA tasks.
-        for p in c.execute("""SELECT project_id,COUNT(*) n FROM estimator_takeoff_items GROUP BY project_id HAVING COUNT(*)>0""").fetchall():
+        # QA: queue a first audit once takeoff items exist.
+        for p in c.execute("""SELECT x.project_id,COUNT(*) n FROM estimator_takeoff_items x
+                              WHERE NOT EXISTS(
+                                SELECT 1 FROM agent_tasks t
+                                JOIN agent_identities a ON a.id=t.agent_id
+                                WHERE a.name='QA Auditor'
+                                  AND t.task_type='audit_takeoff'
+                                  AND t.related_type='estimator_project'
+                                  AND t.related_id=x.project_id
+                                  AND t.status='Completed'
+                              )
+                              GROUP BY x.project_id HAVING COUNT(*)>0""").fetchall():
             enqueue(c,"QA Auditor","audit_takeoff","estimator_project",p["project_id"],70)
         c.commit()
     finally:c.close()
