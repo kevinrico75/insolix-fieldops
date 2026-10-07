@@ -394,6 +394,7 @@ def _bc_value(obj,*paths):
 def ingest_buildingconnected_opportunity(payload):
     raw=payload.get("raw") or payload
     attrs=payload.get("attributes") or (raw.get("attributes") if isinstance(raw,dict) else {}) or {}
+    stored_raw={"opportunity":raw,"bc_context":payload.get("bc_context") or {},"attributes":attrs}
     external_id=str(payload.get("external_id") or payload.get("id") or raw.get("id") or "")
     title=payload.get("title") or _bc_value(attrs,"name","projectName","title") or "BuildingConnected Opportunity"
     company=payload.get("company") or _bc_value(attrs,"clientName","companyName","generalContractorName","ownerName")
@@ -411,7 +412,7 @@ def ingest_buildingconnected_opportunity(payload):
                       ("BuildingConnected / Bid Board Pro","buildingconnected","https://app.buildingconnected.com",1,"Connected via Autodesk APS"))
             src=c.execute("SELECT id,name FROM opportunity_sources WHERE source_type='buildingconnected' LIMIT 1").fetchone()
         score=upsert_opportunity(c,src["id"],src["name"],external_id or title,title,company,desc,location,"",
-                                 posted,due,status,"",url,estimated_value=0,raw=raw)
+                                 posted,due,status,"",url,estimated_value=0,raw=stored_raw)
         if score<18:
             c.execute("""UPDATE opportunities SET trade='Construction Review',match_score=30,
                        match_reasons='BuildingConnected invitation - review plans/specs for INSOLIX scope'
