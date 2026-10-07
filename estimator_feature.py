@@ -82,13 +82,15 @@ def init_estimator_db():
           FOREIGN KEY(project_id) REFERENCES estimator_projects(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_estimator_project ON estimator_takeoff_items(project_id);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_estimator_document_source ON estimator_documents(project_id,source_provider,source_ref) WHERE source_ref IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_estimator_trade ON estimator_takeoff_items(trade);
         """)
         cols={r["name"] for r in c.execute("PRAGMA table_info(estimator_documents)").fetchall()}
         for name,typ in [("source_ref","TEXT"),("source_provider","TEXT"),("source_url","TEXT")]:
             if name not in cols:
                 c.execute(f"ALTER TABLE estimator_documents ADD COLUMN {name} {typ}")
+        c.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_estimator_document_source
+                     ON estimator_documents(project_id,source_provider,source_ref)
+                     WHERE source_ref IS NOT NULL""")
         c.commit()
     finally: c.close()
 
