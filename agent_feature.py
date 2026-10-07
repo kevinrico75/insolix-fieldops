@@ -335,8 +335,25 @@ def install(app):
             tasks=c.execute("""SELECT t.*,a.name agent_name FROM agent_tasks t JOIN agent_identities a ON a.id=t.agent_id ORDER BY t.id DESC LIMIT 100""").fetchall()
             audit=c.execute("SELECT * FROM agent_audit_log ORDER BY id DESC LIMIT 100").fetchall()
             health=c.execute("SELECT * FROM agent_health_checks ORDER BY id DESC LIMIT 20").fetchall()
+            pipeline=c.execute("""SELECT o.id opportunity_id,o.title,o.source_name,o.trade,o.match_score,o.due_date,
+                p.id project_id,p.status project_status,
+                (SELECT COUNT(*) FROM estimator_documents d WHERE d.project_id=p.id) doc_count,
+                (SELECT COUNT(*) FROM estimator_takeoff_items x WHERE x.project_id=p.id) takeoff_count,
+                (SELECT q.status FROM estimator_qa_reviews q WHERE q.project_id=p.id ORDER BY q.id DESC LIMIT 1) qa_status,
+                CASE
+                  WHEN p.id IS NULL THEN 'Awaiting Estimator Handoff'
+                  WHEN (SELECT COUNT(*) FROM estimator_documents d WHERE d.project_id=p.id)=0 THEN 'Waiting for Bid Documents'
+                  WHEN (SELECT COUNT(*) FROM estimator_takeoff_items x WHERE x.project_id=p.id)=0 THEN 'Estimator Processing'
+                  WHEN (SELECT COUNT(*) FROM estimator_qa_reviews q WHERE q.project_id=p.id)=0 THEN 'Waiting for QA'
+                  WHEN (SELECT q.status FROM estimator_qa_reviews q WHERE q.project_id=p.id ORDER BY q.id DESC LIMIT 1) LIKE 'PASS%' THEN 'Ready for Human Review'
+                  ELSE 'QA / Takeoff Review'
+                END pipeline_stage
+                FROM opportunities o
+                LEFT JOIN estimator_projects p ON p.opportunity_id=o.id
+                WHERE o.source_name LIKE 'BuildingConnected%'
+                ORDER BY CASE WHEN o.due_date IS NULL OR o.due_date='' THEN 1 ELSE 0 END,o.due_date,o.id DESC LIMIT 100""").fetchall()
         finally:c.close()
-        return templates.TemplateResponse("agents.html",{"request":request,"agents":agents,"perms":perms,"tasks":tasks,"audit":audit,"health":health})
+        return templates.TemplateResponse("agents.html",{"request":request,"agents":agents,"perms":perms,"tasks":tasks,"audit":audit,"health":health,"pipeline":pipeline})
 
     @app.post("/agents/run")
     def agents_run():
