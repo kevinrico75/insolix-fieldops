@@ -133,6 +133,9 @@ def _bc_doc_type(filename):
     return "Plans"
 
 def _download_document(url,max_bytes=80*1024*1024):
+    from opportunity_feature import _public_http_url
+    if not _public_http_url(url):
+        raise ValueError("download host is not allowed")
     req=urllib.request.Request(url,headers={"User-Agent":"INSOLIX-Estimator/1.0"})
     with urllib.request.urlopen(req,timeout=90) as r:
         length=int(r.headers.get("Content-Length") or 0)
@@ -331,6 +334,8 @@ def install(app):
         try:
             data=_download_document(download_url)
             text,pages=_extract_text(filename,data)
+        except ValueError as e:
+            raise HTTPException(status_code=400,detail=str(e)[:500])
         except Exception as e:
             raise HTTPException(status_code=502,detail=("document download/extract failed: "+str(e))[:500])
 
