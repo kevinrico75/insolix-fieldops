@@ -10,10 +10,9 @@ FIRST-TIME START
 6. Keep the black window open while using FieldOps.
 
 FIRST LOGIN
-Email: admin@local
-Password: admin123
+Sign in with your company administrator account. This package does not publish a default email or password.
 
-After signing in, go to Team & Assets to add your permanent users and Settings to change your password.
+On a brand-new empty database, an initial local administrator is created so you can sign in. Change that password under Settings immediately, then add permanent users from Team & Assets. An existing database keeps its current administrator password.
 
 IF YOU ALREADY USED THE PREVIOUS VERSION
 Read UPGRADE_FROM_V2.txt before launching this release. Copy your old fieldops.db and uploads folder into this release first so your existing records carry forward.

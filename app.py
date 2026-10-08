@@ -1,9 +1,9 @@
-from fastapi import FastAPI, Request, Form, UploadFile, File
+from fastapi import FastAPI, Request, Form, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from contextlib import contextmanager
-import sqlite3, os, shutil, csv, io, secrets, hashlib, hmac, zipfile, base64, json, urllib.parse, urllib.request, urllib.error
+import sqlite3, os, shutil, csv, io, secrets, hashlib, hmac, zipfile, base64, json, time, urllib.parse, urllib.request, urllib.error
 from datetime import date, datetime, timedelta
 
 BASE = os.path.dirname(__file__)
@@ -13,10 +13,43 @@ DB = os.path.join(DATA_DIR, 'fieldops.db')
 UPLOADS = os.path.join(DATA_DIR, 'uploads')
 os.makedirs(UPLOADS, exist_ok=True)
 
-# On first cloud start, seed the persistent data directory from the bundled local database.
+# Optional bundled seed. Never overwrite a database that already exists (production data).
+# A copied seed has its session rows removed so a token shipped with a file cannot be reused.
 BUNDLED_DB = os.path.join(BASE, 'fieldops.db')
-if DATA_DIR != BASE and not os.path.exists(DB) and os.path.exists(BUNDLED_DB):
-    shutil.copy2(BUNDLED_DB, DB)
+
+def _clear_seed_sessions(path):
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute('DELETE FROM sessions')
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
+
+def prepare_data_dir(dest_db=None, bundled_db=None, data_dir=None, base_dir=None):
+    """Create nothing over an existing database.
+
+    Returns 'exists' when dest_db is already present, 'copied' when a bundled
+    file was copied and its sessions cleared, or 'fresh' when startup should
+    create an empty database.
+    """
+    dest_db = dest_db or DB
+    bundled_db = BUNDLED_DB if bundled_db is None else bundled_db
+    data_dir = data_dir or DATA_DIR
+    base_dir = base_dir or BASE
+    parent = os.path.dirname(dest_db)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if os.path.exists(dest_db):
+        return 'exists'
+    if data_dir != base_dir and bundled_db and os.path.exists(bundled_db):
+        shutil.copy2(bundled_db, dest_db)
+        _clear_seed_sessions(dest_db)
+        return 'copied'
+    return 'fresh'
+
+prepare_data_dir()
 BUNDLED_UPLOADS = os.path.join(BASE, 'uploads')
 if DATA_DIR != BASE and os.path.isdir(BUNDLED_UPLOADS) and not os.listdir(UPLOADS):
     for name in os.listdir(BUNDLED_UPLOADS):
@@ -157,8 +190,19 @@ def init_db():
         );
         ''')
         # Safe migrations from V1
-        for name, definition in [('lead_id','INTEGER'),('sales_rep','TEXT'),('estimator','TEXT'),('project_manager','TEXT'),('discount','REAL DEFAULT 0'),('tax_rate','REAL DEFAULT 0'),('expires_on','TEXT')]:
+        for name, definition in [('lead_id','INTEGER'),('sales_rep','TEXT'),('estimator','TEXT'),('project_manager','TEXT'),('discount','REAL DEFAULT 0'),('tax_rate','REAL DEFAULT 0'),('expires_on','TEXT'),('share_token','TEXT')]:
             ensure_col(c,'estimates',name,definition)
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_estimates_share_token ON estimates(share_token) WHERE share_token IS NOT NULL")
+        for row in c.execute("SELECT id FROM estimates WHERE share_token IS NULL OR share_token=''").fetchall():
+            c.execute('UPDATE estimates SET share_token=? WHERE id=?', (secrets.token_urlsafe(32), row['id']))
+        c.execute('''CREATE TRIGGER IF NOT EXISTS estimates_assign_share_token
+            AFTER INSERT ON estimates
+            FOR EACH ROW
+            WHEN NEW.share_token IS NULL OR NEW.share_token = ''
+            BEGIN
+              UPDATE estimates SET share_token = hex(randomblob(24))
+              WHERE id = NEW.id AND (share_token IS NULL OR share_token = '');
+            END''')
         for name, definition in [('start_time','TEXT'),('end_time','TEXT'),('truck','TEXT'),('sales_rep','TEXT'),('project_manager','TEXT'),('actual_material','REAL DEFAULT 0'),('actual_labor','REAL DEFAULT 0'),('actual_other','REAL DEFAULT 0')]:
             ensure_col(c,'jobs',name,definition)
         for name, definition in [('related_type','TEXT'),('related_id','INTEGER')]:
@@ -335,9 +379,50 @@ def user_for_request(request):
     with db() as c:
         return c.execute('SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND u.active=1',(token,)).fetchone()
 
+def _public_path(path):
+    # Customer proposals are public only via an unguessable /proposal/s/<token> link.
+    # Sequential /proposal/<id>, acceptance-by-id, and /documents/ require a signed-in user.
+    if path.startswith('/static') or path.startswith('/proposal/s/'):
+        return True
+    return path in ['/login','/health','/quickbooks/callback','/api/procurement-alert','/api/buildingconnected/opportunity','/api/buildingconnected/document']
+
+# Failed sign-ins per client address. In-memory and per process; enough for a single Railway replica.
+LOGIN_FAIL_LIMIT = 8
+LOGIN_WINDOW_SECONDS = 15 * 60
+_LOGIN_FAILS = {}
+
+def _client_ip(request):
+    if request.client and request.client.host:
+        return request.client.host
+    return 'unknown'
+
+def login_is_limited(ip, now=None):
+    now = time.monotonic() if now is None else now
+    hits = [t for t in _LOGIN_FAILS.get(ip, []) if now - t < LOGIN_WINDOW_SECONDS]
+    _LOGIN_FAILS[ip] = hits
+    return len(hits) >= LOGIN_FAIL_LIMIT
+
+def note_login_failure(ip, now=None):
+    now = time.monotonic() if now is None else now
+    hits = [t for t in _LOGIN_FAILS.get(ip, []) if now - t < LOGIN_WINDOW_SECONDS]
+    hits.append(now)
+    _LOGIN_FAILS[ip] = hits
+
+def clear_login_failures(ip=None):
+    if ip is None:
+        _LOGIN_FAILS.clear()
+    else:
+        _LOGIN_FAILS.pop(ip, None)
+
+def cookie_secure(request):
+    forwarded = (request.headers.get('x-forwarded-proto') or '').split(',')[0].strip().lower()
+    if forwarded:
+        return forwarded == 'https'
+    return request.url.scheme == 'https'
+
 @app.middleware('http')
 async def auth_guard(request: Request, call_next):
-    public = request.url.path.startswith('/static') or request.url.path.startswith('/documents/') or request.url.path.startswith('/proposal/') or request.url.path in ['/login','/health','/quickbooks/callback','/api/procurement-alert','/api/buildingconnected/opportunity','/api/buildingconnected/document']
+    public = _public_path(request.url.path)
     u=user_for_request(request)
     request.state.user=u
     if not public and not u:
@@ -823,11 +908,28 @@ def upload_job_document(job_id:int,file:UploadFile=File(...)):
     with db() as c: c.execute('INSERT INTO documents(related_type,related_id,filename,stored_name) VALUES (?,?,?,?)',('job',job_id,file.filename,stored)); activity(c,'document',f'Uploaded {file.filename} to job #{job_id}','job',job_id)
     return RedirectResponse(f'/jobs/{job_id}',303)
 
+def _safe_upload_path(stored_name):
+    root = os.path.realpath(UPLOADS)
+    name = os.path.basename(stored_name or '')
+    if not name:
+        return None
+    path = os.path.realpath(os.path.join(root, name))
+    try:
+        if os.path.commonpath([root, path]) != root:
+            return None
+    except ValueError:
+        return None
+    if not os.path.isfile(path):
+        return None
+    return path
+
 @app.get('/documents/{doc_id}')
 def get_document(doc_id:int):
     with db() as c: d=c.execute('SELECT * FROM documents WHERE id=?',(doc_id,)).fetchone()
     if not d: return RedirectResponse('/',303)
-    return FileResponse(os.path.join(UPLOADS,d['stored_name']),filename=d['filename'])
+    path = _safe_upload_path(d['stored_name'])
+    if not path: return RedirectResponse('/',303)
+    return FileResponse(path, filename=d['filename'])
 
 @app.get('/api/pricebook/{item_id}')
 def pricebook_api(item_id:int):
@@ -848,15 +950,20 @@ def login_page(request:Request, error:str=''):
     return templates.TemplateResponse('login.html',{'request':request,'error':error})
 
 @app.post('/login')
-def login(email:str=Form(...), password:str=Form(...)):
+def login(request:Request, email:str=Form(...), password:str=Form(...)):
+    ip = _client_ip(request)
+    if login_is_limited(ip):
+        return RedirectResponse('/login?error=Too%20many%20sign-in%20attempts.%20Try%20again%20later.',303)
     with db() as c:
         u=c.execute('SELECT * FROM users WHERE lower(email)=lower(?) AND active=1',(email.strip(),)).fetchone()
         if not u or not verify_password(password,u['password_hash'],u['password_salt']):
+            note_login_failure(ip)
             return RedirectResponse('/login?error=Invalid%20email%20or%20password',303)
         token=secrets.token_urlsafe(32)
         c.execute('INSERT INTO sessions(token,user_id) VALUES (?,?)',(token,u['id']))
+    clear_login_failures(ip)
     r=RedirectResponse('/',303)
-    r.set_cookie('fieldops_session',token,httponly=True,samesite='lax',max_age=60*60*24*14)
+    r.set_cookie('fieldops_session',token,httponly=True,samesite='lax',secure=cookie_secure(request),max_age=60*60*24*14)
     return r
 
 @app.post('/logout')
@@ -866,7 +973,7 @@ def logout(request:Request):
         if token:
             c.execute('DELETE FROM sessions WHERE token=?',(token,))
     r=RedirectResponse('/login',303)
-    r.delete_cookie('fieldops_session')
+    r.delete_cookie('fieldops_session',httponly=True,samesite='lax',secure=cookie_secure(request))
     return r
 
 @app.get('/search', response_class=HTMLResponse)
@@ -911,37 +1018,88 @@ def duplicate_estimate(estimate_id:int):
         activity(c,'estimate',f'Duplicated estimate #{estimate_id} as #{new_id}','estimate',new_id)
     return RedirectResponse(f'/estimates/{new_id}',303)
 
-@app.get('/proposal/{estimate_id}', response_class=HTMLResponse)
-def proposal(request:Request, estimate_id:int):
-    with db() as c:
+def _load_proposal(c, estimate_id=None, share_token=None):
+    if share_token:
+        e=c.execute('SELECT e.*,c.name customer_name,c.company,c.email,c.phone,c.address FROM estimates e JOIN customers c ON c.id=e.customer_id WHERE e.share_token=?',(share_token,)).fetchone()
+    else:
         e=c.execute('SELECT e.*,c.name customer_name,c.company,c.email,c.phone,c.address FROM estimates e JOIN customers c ON c.id=e.customer_id WHERE e.id=?',(estimate_id,)).fetchone()
-        phases=c.execute('SELECT * FROM estimate_phases WHERE estimate_id=? ORDER BY sort_order,id',(estimate_id,)).fetchall()
-        items=c.execute('SELECT * FROM estimate_items WHERE estimate_id=? AND selected=1 ORDER BY phase_id,sort_order,id',(estimate_id,)).fetchall()
-        totals=estimate_totals(c,estimate_id)
-        sig=c.execute('SELECT * FROM signatures WHERE estimate_id=? ORDER BY id DESC LIMIT 1',(estimate_id,)).fetchone()
-        company=c.execute('SELECT * FROM company_settings WHERE id=1').fetchone()
+    if not e:
+        return None
+    phases=c.execute('SELECT * FROM estimate_phases WHERE estimate_id=? ORDER BY sort_order,id',(e['id'],)).fetchall()
+    items=c.execute('SELECT * FROM estimate_items WHERE estimate_id=? AND selected=1 ORDER BY phase_id,sort_order,id',(e['id'],)).fetchall()
+    totals=estimate_totals(c,e['id'])
+    sig=c.execute('SELECT * FROM signatures WHERE estimate_id=? ORDER BY id DESC LIMIT 1',(e['id'],)).fetchone()
+    company=c.execute('SELECT * FROM company_settings WHERE id=1').fetchone()
     by={p['id']:[] for p in phases}
     for i in items:
         by.setdefault(i['phase_id'],[]).append(i)
-    return templates.TemplateResponse('proposal.html',{'request':request,'e':e,'phases':phases,'items_by_phase':by,'totals':totals,'signature':sig,'company':company})
+    return {'e':e,'phases':phases,'items_by_phase':by,'totals':totals,'signature':sig,'company':company}
+
+def _proposal_response(request, payload, share_mode):
+    return templates.TemplateResponse('proposal.html',{'request':request,'share_mode':share_mode,**payload})
+
+@app.get('/proposal/s/{token}', response_class=HTMLResponse)
+def proposal_share(request:Request, token:str):
+    with db() as c:
+        payload=_load_proposal(c, share_token=token)
+    if not payload:
+        raise HTTPException(status_code=404, detail='Proposal not found')
+    return _proposal_response(request, payload, True)
+
+@app.post('/proposal/s/{token}/accept')
+def accept_shared_proposal(request:Request, token:str, signer_name:str=Form(...), signer_email:str=Form('')):
+    with db() as c:
+        e=c.execute('SELECT * FROM estimates WHERE share_token=?',(token,)).fetchone()
+        if not e:
+            raise HTTPException(status_code=404, detail='Proposal not found')
+        existing_sig=c.execute('SELECT id FROM signatures WHERE estimate_id=? LIMIT 1',(e['id'],)).fetchone()
+        if not existing_sig and e['status']!='Accepted':
+            totals=estimate_totals(c,e['id'])
+            c.execute('INSERT INTO signatures(estimate_id,signer_name,signer_email,accepted_total,ip_address) VALUES (?,?,?,?,?)',(e['id'],signer_name,signer_email,totals['total'],request.client.host if request.client else ''))
+            c.execute('UPDATE estimates SET status=?,sell_price=?,material_cost=?,labor_cost=?,overhead_cost=? WHERE id=?',('Pending Approval',totals['total'],totals['material'],totals['labor'],totals['other'],e['id']))
+            activity(c,'signature',f'{signer_name} submitted proposal acceptance for estimate #{e["id"]}; job not created','estimate',e['id'])
+    return RedirectResponse(f'/proposal/s/{token}',303)
+
+@app.get('/proposal/{estimate_id}', response_class=HTMLResponse)
+def proposal(request:Request, estimate_id:int):
+    with db() as c:
+        payload=_load_proposal(c, estimate_id=estimate_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail='Estimate not found')
+    return _proposal_response(request, payload, False)
 
 @app.post('/proposal/{estimate_id}/accept')
-def accept_proposal(request:Request, estimate_id:int, signer_name:str=Form(...), signer_email:str=Form('')):
+def accept_proposal(estimate_id:int):
+    # Sequential-id acceptance no longer creates a signature or a job.
+    raise HTTPException(status_code=404, detail='Use the customer proposal link')
+
+def _create_job_for_accepted_estimate(c, e):
+    existing=c.execute('SELECT id FROM jobs WHERE estimate_id=?',(e['id'],)).fetchone()
+    if existing:
+        return existing['id']
+    cust=c.execute('SELECT * FROM customers WHERE id=?',(e['customer_id'],)).fetchone()
+    c.execute('INSERT INTO jobs(customer_id,estimate_id,title,trade,status,address,work_order,sales_rep,project_manager) VALUES (?,?,?,?,?,?,?,?,?)',(e['customer_id'],e['id'],e['title'],e['trade'],'Unscheduled',(cust['address'] if cust else '') or '',e['notes'] or '',e['sales_rep'],e['project_manager']))
+    jid=c.execute('SELECT last_insert_rowid() id').fetchone()['id']
+    c.execute('INSERT INTO work_orders(job_id,title,status,instructions) VALUES (?,?,?,?)',(jid,e['title'],'Open',e['notes'] or ''))
+    return jid
+
+@app.post('/estimates/{estimate_id}/approve-acceptance')
+def approve_customer_acceptance(request:Request, estimate_id:int):
+    u=user_for_request(request)
+    if not u or u['role']!='Admin':
+        return RedirectResponse(f'/estimates/{estimate_id}?approval=admin',303)
     with db() as c:
-        totals=estimate_totals(c,estimate_id)
-        c.execute('INSERT INTO signatures(estimate_id,signer_name,signer_email,accepted_total,ip_address) VALUES (?,?,?,?,?)',(estimate_id,signer_name,signer_email,totals['total'],request.client.host if request.client else ''))
-        c.execute('UPDATE estimates SET status=?,sell_price=?,material_cost=?,labor_cost=?,overhead_cost=? WHERE id=?',('Accepted',totals['total'],totals['material'],totals['labor'],totals['other'],estimate_id))
         e=c.execute('SELECT * FROM estimates WHERE id=?',(estimate_id,)).fetchone()
-        existing=c.execute('SELECT id FROM jobs WHERE estimate_id=?',(estimate_id,)).fetchone()
-        if not existing:
-            cust=c.execute('SELECT * FROM customers WHERE id=?',(e['customer_id'],)).fetchone()
-            c.execute('INSERT INTO jobs(customer_id,estimate_id,title,trade,status,address,work_order,sales_rep,project_manager) VALUES (?,?,?,?,?,?,?,?,?)',(e['customer_id'],estimate_id,e['title'],e['trade'],'Unscheduled',cust['address'],e['notes'] or '',e['sales_rep'],e['project_manager']))
-            jid=c.execute('SELECT last_insert_rowid() id').fetchone()['id']
-            c.execute('INSERT INTO work_orders(job_id,title,status,instructions) VALUES (?,?,?,?)',(jid,e['title'],'Open',e['notes'] or ''))
+        sig=c.execute('SELECT id FROM signatures WHERE estimate_id=? LIMIT 1',(estimate_id,)).fetchone() if e else None
+        if not e or not sig:
+            return RedirectResponse(f'/estimates/{estimate_id}?approval=missing',303)
+        c.execute("UPDATE estimates SET status='Accepted' WHERE id=?",(estimate_id,))
+        e=c.execute('SELECT * FROM estimates WHERE id=?',(estimate_id,)).fetchone()
+        _create_job_for_accepted_estimate(c, e)
         if e['lead_id']:
             c.execute("UPDATE leads SET status='Won' WHERE id=?",(e['lead_id'],))
-        activity(c,'signature',f'{signer_name} accepted estimate #{estimate_id}','estimate',estimate_id)
-    return RedirectResponse(f'/proposal/{estimate_id}',303)
+        activity(c,'signature',f'{u["name"]} approved customer acceptance and created the job for estimate #{estimate_id}','estimate',estimate_id)
+    return RedirectResponse(f'/estimates/{estimate_id}?approval=1',303)
 
 @app.get('/invoices/{invoice_id}', response_class=HTMLResponse)
 def invoice_detail(request:Request, invoice_id:int):

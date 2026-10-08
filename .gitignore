@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+*.pyo
+fieldops.db
+uploads/
+estimator_uploads/
+.venv/
+.pytest_cache/
+.mypy_cache/
