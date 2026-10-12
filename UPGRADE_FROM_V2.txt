@@ -13,8 +13,4 @@ The new release automatically adds the new tables and fields while keeping the o
 If you have uploaded job files/photos in V2, also copy the old "uploads" folder into this new folder before starting.
 
 FIRST LOGIN AFTER UPGRADE
-If the old database did not yet have users, the program will create:
-Email: admin@local
-Password: admin123
-
-After signing in, go to Team & Assets to create permanent users and Settings to change the administrator password.
+Your existing administrator password is not changed by this upgrade. If the old database had no users, the program creates an initial local administrator so you can sign in. This package does not publish that account. Change the password under Settings and create permanent users under Team & Assets.

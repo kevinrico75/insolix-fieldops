@@ -10,10 +10,9 @@ Rico FieldOps is a local-first field-service CRM, estimating, scheduling, job-ma
 5. The app opens at http://127.0.0.1:8000
 
 ## First login
-- Email: `admin@local`
-- Password: `admin123`
+Sign in with the administrator account already configured for your company. FieldOps does not publish a default email or password on the sign-in page.
 
-Add permanent users under **Team & Assets**. Field-role users are restricted from admin/financial setup areas.
+On a brand-new empty database, an initial local administrator is created so you can get in. Change that password under **Settings** immediately and add permanent users under **Team & Assets**. Field-role users are restricted from admin/financial setup areas. If this database was already in use, the existing administrator password is left unchanged.
 
 ## Included
 - Leads/opportunity tracking and follow-up dates

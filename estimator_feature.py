@@ -4,11 +4,12 @@ from fastapi.templating import Jinja2Templates
 from pypdf import PdfReader
 import sqlite3, os, re, json, shutil, uuid, io, urllib.request, urllib.error, hmac, zipfile
 
+from storage_paths import apply_storage, resolve_storage
 BASE=os.path.dirname(__file__)
-DATA_DIR=os.environ.get("INSOLIX_DATA_DIR",BASE)
-DB=os.path.join(DATA_DIR,"fieldops.db")
-UPLOAD_ROOT=os.path.join(DATA_DIR,"estimator_uploads")
-os.makedirs(UPLOAD_ROOT,exist_ok=True)
+_PATHS=apply_storage(resolve_storage(BASE))
+DATA_DIR=_PATHS.data_dir
+DB=_PATHS.db
+UPLOAD_ROOT=_PATHS.estimator_uploads
 templates=Jinja2Templates(directory=os.path.join(BASE,"templates"))
 
 def _conn():
@@ -133,6 +134,9 @@ def _bc_doc_type(filename):
     return "Plans"
 
 def _download_document(url,max_bytes=80*1024*1024):
+    from opportunity_feature import _public_http_url
+    if not _public_http_url(url):
+        raise ValueError("download host is not allowed")
     req=urllib.request.Request(url,headers={"User-Agent":"INSOLIX-Estimator/1.0"})
     with urllib.request.urlopen(req,timeout=90) as r:
         length=int(r.headers.get("Content-Length") or 0)
@@ -331,6 +335,8 @@ def install(app):
         try:
             data=_download_document(download_url)
             text,pages=_extract_text(filename,data)
+        except ValueError as e:
+            raise HTTPException(status_code=400,detail=str(e)[:500])
         except Exception as e:
             raise HTTPException(status_code=502,detail=("document download/extract failed: "+str(e))[:500])
 
