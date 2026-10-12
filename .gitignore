@@ -4,6 +4,7 @@ __pycache__/
 fieldops.db
 uploads/
 estimator_uploads/
+backups/
 .venv/
 .pytest_cache/
 .mypy_cache/

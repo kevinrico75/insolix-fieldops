@@ -4,11 +4,12 @@ from fastapi.templating import Jinja2Templates
 from pypdf import PdfReader
 import sqlite3, os, re, json, shutil, uuid, io, urllib.request, urllib.error, hmac, zipfile
 
+from storage_paths import apply_storage, resolve_storage
 BASE=os.path.dirname(__file__)
-DATA_DIR=os.environ.get("INSOLIX_DATA_DIR",BASE)
-DB=os.path.join(DATA_DIR,"fieldops.db")
-UPLOAD_ROOT=os.path.join(DATA_DIR,"estimator_uploads")
-os.makedirs(UPLOAD_ROOT,exist_ok=True)
+_PATHS=apply_storage(resolve_storage(BASE))
+DATA_DIR=_PATHS.data_dir
+DB=_PATHS.db
+UPLOAD_ROOT=_PATHS.estimator_uploads
 templates=Jinja2Templates(directory=os.path.join(BASE,"templates"))
 
 def _conn():

@@ -3,15 +3,18 @@ from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from contextlib import contextmanager
-import sqlite3, os, shutil, csv, io, secrets, hashlib, hmac, zipfile, base64, json, time, urllib.parse, urllib.request, urllib.error
+from starlette.background import BackgroundTask
+import sqlite3, os, shutil, csv, io, secrets, hashlib, hmac, base64, json, time, tempfile, urllib.parse, urllib.request, urllib.error
 from datetime import date, datetime, timedelta
+from backup_lib import create_backup
+from storage_paths import apply_storage, audit_runtime_paths, log_storage_paths, resolve_storage
 
 BASE = os.path.dirname(__file__)
-DATA_DIR = os.environ.get('INSOLIX_DATA_DIR', BASE)
-os.makedirs(DATA_DIR, exist_ok=True)
-DB = os.path.join(DATA_DIR, 'fieldops.db')
-UPLOADS = os.path.join(DATA_DIR, 'uploads')
-os.makedirs(UPLOADS, exist_ok=True)
+PATHS = apply_storage(resolve_storage(BASE))
+DATA_DIR = PATHS.data_dir
+DB = PATHS.db
+UPLOADS = PATHS.uploads
+BACKUPS = PATHS.backups
 
 # Optional bundled seed. Never overwrite a database that already exists (production data).
 # A copied seed has its session rows removed so a token shipped with a file cannot be reused.
@@ -435,7 +438,10 @@ async def auth_guard(request: Request, call_next):
     return response
 
 @app.on_event('startup')
-def startup(): init_db()
+def startup():
+    log_storage_paths(PATHS)
+    audit_runtime_paths(PATHS)
+    init_db()
 
 def money(v):
     try: return f"${float(v or 0):,.2f}"
@@ -1299,18 +1305,31 @@ def quickbooks_sync_payments():
     except Exception as e:
         return RedirectResponse('/settings?qb_error='+urllib.parse.quote(str(e)[:180]),303)
 
+def _remove_backup_artifacts(*paths):
+    for path in paths:
+        if path and os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        elif path and os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
 @app.get('/backup')
 def backup_download():
-    mem=io.BytesIO()
-    with zipfile.ZipFile(mem,'w',zipfile.ZIP_DEFLATED) as z:
-        z.write(DB,'fieldops.db')
-        if os.path.isdir(UPLOADS):
-            for root,dirs,files in os.walk(UPLOADS):
-                for f in files:
-                    path=os.path.join(root,f)
-                    z.write(path,os.path.join('uploads',f))
-    mem.seek(0)
-    return Response(mem.getvalue(),media_type='application/zip',headers={'Content-Disposition':f'attachment; filename=fieldops-backup-{date.today().isoformat()}.zip'})
+    staging = tempfile.mkdtemp(prefix='insolix-admin-backup-')
+    try:
+        result = create_backup(DATA_DIR, staging, record_manifest_dir=BACKUPS)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise HTTPException(status_code=500, detail='Backup failed')
+    filename = os.path.basename(result.archive_path)
+    return FileResponse(
+        result.archive_path,
+        media_type='application/gzip',
+        filename=filename,
+        background=BackgroundTask(_remove_backup_artifacts, staging),
+    )
 
 @app.get('/export/customers.csv')
 def export_customers():
