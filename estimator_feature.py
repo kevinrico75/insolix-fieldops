@@ -100,6 +100,7 @@ def init_estimator_db():
 
 import urllib.parse
 import package_ingest
+import estimate_report
 
 def _extract_pdf(data):
     reader=PdfReader(io.BytesIO(data))
@@ -153,6 +154,12 @@ def _poke_estimator_queue(project_id):
 
 def install(app):
     init_estimator_db()
+    c=_conn()
+    try:
+        estimate_report.migrate_report_schema(c)
+    finally:
+        c.close()
+    estimate_report.install_routes(app, templates)
 
     @app.get("/estimator",response_class=HTMLResponse)
     def estimator_home(request:Request):

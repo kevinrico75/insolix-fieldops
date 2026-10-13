@@ -485,6 +485,7 @@ def ingest_member(project_id, filename, data, *, doc_type=None, revision_label="
                            text_chars=text_chars, document_id=did, discipline=discipline, needs_ocr=needs_ocr,
                            filename=safe)
         did = c.execute("SELECT last_insert_rowid() id").fetchone()["id"]
+        c.execute("DELETE FROM estimator_document_pages WHERE document_id=?", (did,))
         for info in infos:
             c.execute("""INSERT INTO estimator_document_pages(
                 project_id,document_id,page_no,sheet_id,discipline,text_chars,needs_ocr,page_text)

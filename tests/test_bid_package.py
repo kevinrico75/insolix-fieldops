@@ -10,10 +10,10 @@ import sqlite3
 import tempfile
 import zipfile
 
-os.environ["INSOLIX_DATA_DIR"] = tempfile.mkdtemp(prefix="insolix-bid-")
-os.environ["INSOLIX_AGENTS_ENABLED"] = "0"
-os.environ["INSOLIX_INGEST_TOKEN"] = "test-ingest-token"
-os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+os.environ.setdefault("INSOLIX_DATA_DIR", tempfile.mkdtemp(prefix="insolix-bid-"))
+os.environ.setdefault("INSOLIX_AGENTS_ENABLED", "0")
+os.environ.setdefault("INSOLIX_INGEST_TOKEN", "test-ingest-token")
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 import fitz
 import pytest

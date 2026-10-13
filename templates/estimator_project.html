@@ -67,6 +67,7 @@
   <p>{{p.package_summary or ''}}</p>
   <p><b>Workflow:</b> {{p.status}}</p><p><b>Source:</b> {{p.source_name or 'Manual'}}</p>
   {% if p.source_url %}<p><a class="smallbtn" href="{{p.source_url}}" target="_blank" rel="noopener">Open Source Project</a></p>{% endif %}
+  <p><a class="smallbtn" href="/estimator/{{p.id}}/report">Estimate Report</a> <a class="smallbtn" href="/estimator/{{p.id}}/report.csv">CSV</a> <a class="smallbtn" href="/estimator/{{p.id}}/report.pdf">PDF</a></p>
   <p><a class="smallbtn" href="/estimator/{{p.id}}/geometry">Blueprint Geometry Takeoff</a></p>
   <form method="post" action="/estimator/{{p.id}}/geometry/scan" style="margin-bottom:10px"><button class="secondary">Scan Blueprint Geometry</button></form>
   <form method="post" action="/estimator/{{p.id}}/create-estimate"><button>Create INSOLIX Estimate from Verified Quantities</button></form>
