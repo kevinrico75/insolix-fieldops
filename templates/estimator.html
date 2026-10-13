@@ -14,7 +14,7 @@
     {% for p in projects %}
     <tr><td><b>{{p.title}}</b><br><small>{{p.company or '—'}} • {{p.location or '—'}}</small></td>
     <td>{{p.source_name or 'Manual'}}</td><td>{{p.due_date or '—'}}</td><td>{{p.doc_count}}</td><td>{{p.item_count}}</td>
-    <td><span class="status">{{p.status}}</span></td><td><a class="smallbtn" href="/estimator/{{p.id}}">Open Estimator</a></td></tr>
+    <td><span class="status">{{p.package_status or p.status}}</span><br><small>{{p.status}}</small></td><td><a class="smallbtn" href="/estimator/{{p.id}}">Open Estimator</a></td></tr>
     {% else %}<tr><td colspan="7" class="empty">No estimator projects yet. Send a project from Opportunity Finder.</td></tr>{% endfor %}
   </table></div>
 </section>

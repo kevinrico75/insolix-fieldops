@@ -95,6 +95,17 @@ def init_agent_db():
             a=c.execute("SELECT id FROM agent_identities WHERE name=?",(name,)).fetchone()
             for p in perms:
                 c.execute("INSERT OR IGNORE INTO agent_permissions(agent_id,permission) VALUES(?,?)",(a["id"],p))
+        task_cols={r["name"] for r in c.execute("PRAGMA table_info(agent_tasks)").fetchall()}
+        for name, definition in (
+            ("attempt_count","INTEGER DEFAULT 0"),
+            ("max_attempts","INTEGER DEFAULT 3"),
+            ("next_attempt_at","TEXT"),
+            ("last_error","TEXT"),
+        ):
+            if name not in task_cols:
+                c.execute(f"ALTER TABLE agent_tasks ADD COLUMN {name} {definition}")
+        c.execute("UPDATE agent_tasks SET attempt_count=0 WHERE attempt_count IS NULL")
+        c.execute("UPDATE agent_tasks SET max_attempts=3 WHERE max_attempts IS NULL OR max_attempts=0")
         c.commit()
     finally:c.close()
 
@@ -103,6 +114,25 @@ def log_action(c,agent_name,action,related_type="",related_id=None,detail=""):
     c.execute("INSERT INTO agent_audit_log(agent_id,agent_name,action,related_type,related_id,detail) VALUES(?,?,?,?,?,?)",
               (a["id"] if a else None,agent_name,action,related_type,related_id,detail[:2000]))
 
+def _max_attempts():
+    try:
+        return max(1, int(os.getenv("INSOLIX_AGENT_MAX_ATTEMPTS", "3")))
+    except ValueError:
+        return 3
+
+def _backoff_seconds(attempt_count):
+    try:
+        base=max(0, int(os.getenv("INSOLIX_AGENT_BACKOFF_SECONDS", "300")))
+    except ValueError:
+        base=300
+    return base * (2 ** max(0, int(attempt_count) - 1))
+
+def _stale_seconds():
+    try:
+        return max(1, int(os.getenv("INSOLIX_AGENT_STALE_SECONDS", "1800")))
+    except ValueError:
+        return 1800
+
 def enqueue(c,agent_name,task_type,related_type="",related_id=None,priority=50,payload=None):
     a=c.execute("SELECT id FROM agent_identities WHERE name=? AND active=1",(agent_name,)).fetchone()
     if not a:return None
@@ -110,9 +140,105 @@ def enqueue(c,agent_name,task_type,related_type="",related_id=None,priority=50,p
                           AND COALESCE(related_id,-1)=COALESCE(?,-1) AND status IN ('Queued','Running') LIMIT 1""",
                        (a["id"],task_type,related_type,related_id)).fetchone()
     if existing:return existing["id"]
-    c.execute("""INSERT INTO agent_tasks(agent_id,task_type,related_type,related_id,priority,payload_json)
-                 VALUES(?,?,?,?,?,?)""",(a["id"],task_type,related_type,related_id,priority,json.dumps(payload or {})))
+    c.execute("""INSERT INTO agent_tasks(agent_id,task_type,related_type,related_id,priority,payload_json,attempt_count,max_attempts)
+                 VALUES(?,?,?,?,?,?,0,?)""",(a["id"],task_type,related_type,related_id,priority,json.dumps(payload or {}),_max_attempts()))
     return c.execute("SELECT last_insert_rowid() id").fetchone()["id"]
+
+def _seen_document_id(task):
+    if not task or not task["result_json"]:
+        return None
+    try:
+        payload=json.loads(task["result_json"])
+    except Exception:
+        return None
+    if "max_document_id" not in payload:
+        return None
+    try:
+        return int(payload.get("max_document_id") or 0)
+    except (TypeError, ValueError):
+        return None
+
+def _has_unanalyzed_documents(c, project_id, task):
+    seen=_seen_document_id(task)
+    if seen is not None:
+        n=c.execute("""SELECT COUNT(*) n FROM estimator_documents
+                       WHERE project_id=? AND COALESCE(superseded,0)=0 AND id>?""",(project_id, seen)).fetchone()["n"]
+        return n>0
+    marker=(task["completed_at"] or task["started_at"] or "") if task else ""
+    if not marker:
+        return True
+    n=c.execute("""SELECT COUNT(*) n FROM estimator_documents
+                   WHERE project_id=? AND COALESCE(superseded,0)=0 AND created_at>?""",(project_id, marker)).fetchone()["n"]
+    return n>0
+
+def estimator_analysis_needed(c, project_id):
+    docs=c.execute("""SELECT COUNT(*) n FROM estimator_documents
+                      WHERE project_id=? AND COALESCE(superseded,0)=0""",(project_id,)).fetchone()["n"]
+    if not docs:
+        return False
+    active=c.execute("""SELECT t.id FROM agent_tasks t
+                        JOIN agent_identities a ON a.id=t.agent_id
+                        WHERE a.name='INSOLIX Estimator' AND t.task_type='analyze_project_documents'
+                          AND t.related_type='estimator_project' AND t.related_id=?
+                          AND t.status IN ('Queued','Running') LIMIT 1""",(project_id,)).fetchone()
+    if active:
+        return False
+    latest=c.execute("""SELECT t.* FROM agent_tasks t
+                        JOIN agent_identities a ON a.id=t.agent_id
+                        WHERE a.name='INSOLIX Estimator' AND t.task_type='analyze_project_documents'
+                          AND t.related_type='estimator_project' AND t.related_id=?
+                        ORDER BY t.id DESC LIMIT 1""",(project_id,)).fetchone()
+    if not latest:
+        return True
+    attempts=int(latest["attempt_count"] or 0)
+    max_a=int(latest["max_attempts"] or _max_attempts())
+    if latest["status"]=="Failed" and attempts<max_a:
+        return False
+    if latest["status"] in ("Completed","Failed"):
+        return _has_unanalyzed_documents(c, project_id, latest)
+    return False
+
+def note_new_project_documents(project_id):
+    c=_conn()
+    try:
+        if estimator_analysis_needed(c, project_id):
+            enqueue(c,"INSOLIX Estimator","analyze_project_documents","estimator_project",project_id,75)
+            log_action(c,"INSOLIX Estimator","requeued analysis for new documents","estimator_project",project_id,
+                       "New or revised documents arrived after the previous estimator task.")
+        c.commit()
+    finally:
+        c.close()
+
+def recover_stale_running(c):
+    stale=_stale_seconds()
+    rows=c.execute("""SELECT id, attempt_count, max_attempts FROM agent_tasks
+                      WHERE status='Running' AND started_at IS NOT NULL
+                        AND datetime(started_at) <= datetime('now', ?)""",
+                   (f"-{stale} seconds",)).fetchall()
+    recovered=0
+    for row in rows:
+        attempts=int(row["attempt_count"] or 0)+1
+        max_a=int(row["max_attempts"] or _max_attempts())
+        if attempts>=max_a:
+            c.execute("""UPDATE agent_tasks SET status='Failed', attempt_count=?, completed_at=CURRENT_TIMESTAMP,
+                         next_attempt_at=NULL, last_error=?, result_json=? WHERE id=?""",
+                      (attempts, "stale running task exceeded max attempts",
+                       json.dumps({"error":"stale running task exceeded max attempts"}), row["id"]))
+        else:
+            delay=_backoff_seconds(attempts)
+            c.execute("""UPDATE agent_tasks SET status='Failed', attempt_count=?, completed_at=CURRENT_TIMESTAMP,
+                         started_at=NULL, next_attempt_at=datetime('now', ?), last_error=?, result_json=? WHERE id=?""",
+                      (attempts, f"+{delay} seconds", "recovered stale running task",
+                       json.dumps({"error":"recovered stale running task","retry_after_seconds":delay}), row["id"]))
+        recovered+=1
+    return recovered
+
+def promote_ready_retries(c):
+    cur=c.execute("""UPDATE agent_tasks SET status='Queued', started_at=NULL, next_attempt_at=NULL
+                     WHERE status='Failed' AND attempt_count < COALESCE(max_attempts, ?)
+                       AND next_attempt_at IS NOT NULL AND datetime(next_attempt_at) <= datetime('now')""",
+                  (_max_attempts(),))
+    return cur.rowcount if cur.rowcount is not None else 0
 
 def seed_current_work():
     c=_conn()
@@ -131,20 +257,13 @@ def seed_current_work():
                               )
                               ORDER BY o.match_score DESC,o.id DESC LIMIT 200""").fetchall():
             enqueue(c,"Bid Scout","triage_opportunity","opportunity",o["id"],80 if "BuildingConnected" in (o["source_name"] or "") else 50)
-        # Estimator: queue each estimator project once per available document set.
-        for p in c.execute("""SELECT p.id,COUNT(d.id) docs FROM estimator_projects p
-                              LEFT JOIN estimator_documents d ON d.project_id=p.id
-                              WHERE NOT EXISTS(
-                                SELECT 1 FROM agent_tasks t
-                                JOIN agent_identities a ON a.id=t.agent_id
-                                WHERE a.name='INSOLIX Estimator'
-                                  AND t.task_type='analyze_project_documents'
-                                  AND t.related_type='estimator_project'
-                                  AND t.related_id=p.id
-                                  AND t.status='Completed'
-                              )
-                              GROUP BY p.id HAVING COUNT(d.id)>0""").fetchall():
-            enqueue(c,"INSOLIX Estimator","analyze_project_documents","estimator_project",p["id"],75)
+        # Estimator: queue when documents exist and the latest task is not still in backoff.
+        # A completed task is queued again once a newer document version arrives.
+        for p in c.execute("""SELECT p.id FROM estimator_projects p
+                              WHERE EXISTS(SELECT 1 FROM estimator_documents d
+                                           WHERE d.project_id=p.id AND COALESCE(d.superseded,0)=0)""").fetchall():
+            if estimator_analysis_needed(c, p["id"]):
+                enqueue(c,"INSOLIX Estimator","analyze_project_documents","estimator_project",p["id"],75)
         # QA: queue a first audit once takeoff items exist.
         for p in c.execute("""SELECT x.project_id,COUNT(*) n FROM estimator_takeoff_items x
                               WHERE NOT EXISTS(
@@ -206,11 +325,12 @@ def run_estimator(c,task):
     from estimator_feature import analyze_project
     from geometry_feature import scan_project
     pid=task["related_id"]
+    max_id=c.execute("SELECT COALESCE(MAX(id),0) m FROM estimator_documents WHERE project_id=?",(pid,)).fetchone()["m"]
     created=analyze_project(pid)
     pages=scan_project(pid)
     log_action(c,"INSOLIX Estimator","analyzed estimator project","estimator_project",pid,
                f"Created {created} new scope/takeoff items and indexed {pages} blueprint pages for geometry. No unverified quantity is auto-approved.")
-    return {"ok":True,"created_items":created,"geometry_pages":pages}
+    return {"ok":True,"created_items":created,"geometry_pages":pages,"max_document_id":int(max_id or 0)}
 
 def run_qa(c,task):
     pid=task["related_id"]
@@ -316,30 +436,66 @@ def run_watchdog():
         return {"severity":severity,"summary":summary,"findings":findings}
     finally:c.close()
 
+def _record_task_failure(c, task, error, extra=None):
+    attempts=int(task["attempt_count"] or 0)+1
+    max_a=int(task["max_attempts"] or _max_attempts())
+    err=str(error)[:1000]
+    payload={"error":err,"attempts":attempts}
+    if extra:
+        payload.update(extra)
+    if attempts>=max_a:
+        payload["terminal"]=True
+        c.execute("""UPDATE agent_tasks SET status='Failed', attempt_count=?, completed_at=CURRENT_TIMESTAMP,
+                     next_attempt_at=NULL, last_error=?, result_json=? WHERE id=?""",
+                  (attempts, err, json.dumps(payload), task["id"]))
+    else:
+        delay=_backoff_seconds(attempts)
+        payload["retry_after_seconds"]=delay
+        c.execute("""UPDATE agent_tasks SET status='Failed', attempt_count=?, completed_at=CURRENT_TIMESTAMP,
+                     next_attempt_at=datetime('now', ?), last_error=?, result_json=? WHERE id=?""",
+                  (attempts, f"+{delay} seconds", err, json.dumps(payload), task["id"]))
+
 def run_one_task(task_id):
     c=_conn()
     try:
         task=c.execute("""SELECT t.*,a.name agent_name FROM agent_tasks t JOIN agent_identities a ON a.id=t.agent_id WHERE t.id=?""",(task_id,)).fetchone()
         if not task or task["status"]!="Queued": return False
-        c.execute("UPDATE agent_tasks SET status='Running',started_at=CURRENT_TIMESTAMP WHERE id=?",(task_id,)); c.commit()
+        if task["next_attempt_at"]:
+            ready=c.execute("SELECT CASE WHEN datetime(?)<=datetime('now') THEN 1 ELSE 0 END", (task["next_attempt_at"],)).fetchone()[0]
+            if not ready:
+                return False
+        c.execute("UPDATE agent_tasks SET status='Running',started_at=CURRENT_TIMESTAMP,next_attempt_at=NULL WHERE id=?",(task_id,)); c.commit()
+        seen_docs=None
+        if task["agent_name"]=="INSOLIX Estimator" and task["related_id"]:
+            seen_docs={"max_document_id":int(c.execute("SELECT COALESCE(MAX(id),0) m FROM estimator_documents WHERE project_id=?",(task["related_id"],)).fetchone()["m"] or 0)}
         try:
             if task["agent_name"]=="Bid Scout": result=run_bid_scout(c,task)
             elif task["agent_name"]=="INSOLIX Estimator": result=run_estimator(c,task)
             elif task["agent_name"]=="QA Auditor": result=run_qa(c,task)
             else: result=run_coordinator(c,task)
-            c.execute("UPDATE agent_tasks SET status='Completed',completed_at=CURRENT_TIMESTAMP,result_json=? WHERE id=?",(json.dumps(result),task_id))
+            c.execute("UPDATE agent_tasks SET status='Completed',completed_at=CURRENT_TIMESTAMP,result_json=?,last_error=NULL WHERE id=?",(json.dumps(result),task_id))
             c.execute("UPDATE agent_identities SET last_run_at=CURRENT_TIMESTAMP WHERE id=?",(task["agent_id"],))
             c.commit(); return True
         except Exception as e:
-            c.execute("UPDATE agent_tasks SET status='Failed',completed_at=CURRENT_TIMESTAMP,result_json=? WHERE id=?",(json.dumps({"error":str(e)[:1000]}),task_id)); c.commit(); return False
+            _record_task_failure(c, task, e, seen_docs)
+            c.commit(); return False
     finally:c.close()
 
 def run_queue(limit=25):
+    c=_conn()
+    try:
+        recover_stale_running(c)
+        promote_ready_retries(c)
+        c.commit()
+    finally:
+        c.close()
     run_watchdog()
     seed_current_work()
     c=_conn()
     try:
-        ids=[r["id"] for r in c.execute("SELECT id FROM agent_tasks WHERE status='Queued' ORDER BY priority DESC,id LIMIT ?",(limit,)).fetchall()]
+        ids=[r["id"] for r in c.execute("""SELECT id FROM agent_tasks WHERE status='Queued'
+                                            AND (next_attempt_at IS NULL OR datetime(next_attempt_at)<=datetime('now'))
+                                            ORDER BY priority DESC,id LIMIT ?""",(limit,)).fetchall()]
     finally:c.close()
     done=0
     for tid in ids:

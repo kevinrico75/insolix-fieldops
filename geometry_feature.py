@@ -207,7 +207,7 @@ def generate_vector_suggestions(project_id,document_id,page_no):
 def scan_project(project_id):
     c=_conn()
     try:
-        docs=c.execute("SELECT id FROM estimator_documents WHERE project_id=? AND lower(filename) LIKE '%.pdf' ORDER BY id",(project_id,)).fetchall()
+        docs=c.execute("SELECT id FROM estimator_documents WHERE project_id=? AND lower(filename) LIKE '%.pdf' AND COALESCE(superseded,0)=0 ORDER BY id",(project_id,)).fetchall()
     finally:c.close()
     total=sum(scan_document(project_id,d["id"]) for d in docs)
     c=_conn()
