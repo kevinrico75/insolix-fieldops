@@ -1,0 +1,127 @@
+{% extends 'base.html' %}
+{% block title %}Estimate report | {{report.project.title}}{% endblock %}
+{% block heading %}Estimate report{% endblock %}
+{% block subheading %}{{report.project.title}} • Package {{report.project.package_status or 'Awaiting Documents'}} • Workflow {{report.project.status or '—'}}{% endblock %}
+{% block content %}
+<div id="estimate-report" data-total-status="{{ report.total_status }}" data-package-total="{{ format_money(report.total) }}">
+<div class="toolbar">
+  <div><a class="btn secondary smallbtn" href="/estimator/{{report.project.id}}">Back to project</a></div>
+  <div class="top-actions">
+    <a class="btn secondary smallbtn" href="/estimator/{{report.project.id}}/report.csv">Download CSV</a>
+    <a class="btn secondary smallbtn" href="/estimator/{{report.project.id}}/report.pdf">Download PDF</a>
+  </div>
+</div>
+{% if rates_error %}<div class="notice">{{ rates_error }}</div>{% endif %}
+{% if rates_saved %}<div class="notice success">Saved. Blank rates stay unfilled, and a missing source is not stored.</div>{% endif %}
+{% if report.total_status == 'blocked' %}
+<div class="notice" id="total-blocked">Total blocked. No package total is shown until every quantity, waste factor, pricebook cost, labor rate, overhead rate, and profit rate has a source. A $0 pricebook cost stays unfilled.</div>
+{% else %}
+<div class="notice success" id="total-ready">Every line used on this total has a stated quantity, a stated waste factor, a pricebook cost above zero, and a sourced labor rate. Overhead and profit use the rates saved below.</div>
+{% endif %}
+
+<section class="card">
+  <h2>Drawings and specifications found</h2>
+  <p class="muted">Sheet numbers and spec sections come from the page text. A filename alone is not treated as a sheet number.</p>
+  <div class="table-wrap"><table>
+    <tr><th>File</th><th>Page</th><th>Sheet</th><th>Title</th><th>Discipline</th><th>Spec sections</th><th>Source</th></tr>
+    {% for d in report.drawings %}
+    <tr data-sheet="{{ d.sheet_id }}" data-specs="{{ d.spec_sections|join(', ') }}">
+      <td>{{ d.filename }}{% if d.needs_ocr %}<br><small>Needs OCR / human review</small>{% endif %}</td>
+      <td>{{ d.page_no }}</td>
+      <td>{{ d.sheet_id or unfilled }}</td>
+      <td>{{ d.sheet_title or unfilled }}{% if d.dimension_callouts %}<br><small>Dimensions stated, not converted: {{ d.dimension_callouts|join(' · ') }}</small>{% endif %}</td>
+      <td>{{ d.discipline }}</td>
+      <td>{{ d.spec_sections|join(', ') or unfilled }}</td>
+      <td><small>{{ d.source_provider or '—' }}<br>{{ d.source_ref or '—' }}</small></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="empty">No drawings or specifications are stored.</td></tr>
+    {% endfor %}
+  </table></div>
+</section>
+
+{% for trade, lines in report.scopes.items() %}
+<section class="card">
+  <h2>Scope of work — {{ trade }}</h2>
+  {% for line in lines %}
+  <article class="workorder" data-scope="{{ line.trade }}|{{ line.scope }}|{{ line.spec_section }}" data-qty="{{ format_qty(line.quantity) }}" data-waste="{{ format_qty(line.waste_percent) }}" data-material-qty="{{ format_qty(line.material_qty) }}" data-hours="{{ format_qty(line.hours) }}" data-line-direct="{{ format_money(line.line_direct) }}">
+    <div><b>{{ line.scope or line.trade }}</b> <small>{{ line.material or '' }}{% if line.spec_section %} • Spec {{ line.spec_section }}{% endif %}</small></div>
+    <div class="table-wrap"><table>
+      <tr><th>Measured quantity</th><th>Unit</th><th>Sheet</th><th>Page</th><th>Reference excerpt</th></tr>
+      <tr>
+        <td>{% if line.quantity is not none %}{{ format_qty(line.quantity) }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}</td>
+        <td>{% if line.quantity is not none %}{{ line.unit }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}</td>
+        <td>{{ line.sheet or unfilled }}</td>
+        <td>{{ line.filename }}{% if line.page_no %} p.{{ line.page_no }}{% endif %}</td>
+        <td><small>{{ line.excerpt or unfilled }}</small></td>
+      </tr>
+    </table></div>
+    <p><b>Material.</b>
+      Waste {% if line.waste_percent is not none %}{{ format_qty(line.waste_percent) }}% — {{ line.waste_source }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+      Quantity with waste {% if line.material_qty is not none %}{{ format_qty(line.material_qty) }} {{ line.unit }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+      Material unit cost {% if line.material_unit_cost is not none %}{{ format_money(line.material_unit_cost) }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+      Pricebook source {% if line.pricebook_source %}{{ line.pricebook_source }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+      {% if line.suggested_pricebook %}<small>Suggested, not applied: {{ line.suggested_pricebook }}.</small>{% endif %}
+      Material extension {% if line.material_ext is not none %}{{ format_money(line.material_ext) }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+    </p>
+    <p><b>Labor.</b>
+      Crew {% if line.labor %}{{ line.labor.crew }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+      Production rate {% if line.labor %}{{ format_qty(line.labor.production_rate) }} {{ line.labor.production_unit }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+      Rate source {% if line.labor %}{{ line.labor.rate_source }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+      Hours {% if line.hours is not none %}{{ format_qty(line.hours) }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+      Labor unit cost {% if line.labor_unit_cost is not none %}{{ format_money(line.labor_unit_cost) }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+      Labor extension {% if line.labor_ext is not none %}{{ format_money(line.labor_ext) }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+    </p>
+    {% if line.other_cost_on_file is not none %}<p class="muted">Pricebook other cost on file {{ format_money(line.other_cost_on_file) }} is not included in the total.</p>{% endif %}
+    {% if line.sell_on_file is not none %}<p class="muted">Catalog sell price on file {{ format_money(line.sell_on_file) }} is not used for this total.</p>{% endif %}
+    {% if line.flags %}<ul>{% for flag in line.flags %}<li>{{ flag }}</li>{% endfor %}</ul>{% endif %}
+    <form method="post" action="/estimator/{{report.project.id}}/report/labor" class="line-form">
+      <input type="hidden" name="trade" value="{{ line.trade }}">
+      <input type="hidden" name="scope_type" value="{{ line.scope }}">
+      <label>Crew<input name="crew" value="{{ line.labor.crew if line.labor else '' }}" placeholder="Unfilled until you enter a crew"></label>
+      <label>Production rate<input name="production_rate" value="{{ format_input(line.labor.production_rate) if line.labor else '' }}" placeholder="Unfilled"></label>
+      <label>Unit<input name="production_unit" value="{{ line.labor.production_unit if line.labor else '' }}" placeholder="SF/hour"></label>
+      <label>Rate source<input name="rate_source" value="{{ line.labor.rate_source if line.labor else '' }}" placeholder="Where this rate comes from"></label>
+      <button class="smallbtn">Save labor rate</button>
+    </form>
+  </article>
+  {% else %}
+  <p class="muted">No scope rows for this trade.</p>
+  {% endfor %}
+</section>
+{% endfor %}
+
+<section class="card">
+  <h2>Pricing, overhead, and profit</h2>
+  <p>Direct cost {% if report.direct is not none %}{{ format_money(report.direct) }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.</p>
+  <p>Overhead {% if report.rates.overhead_percent is not none %}{{ format_qty(report.rates.overhead_percent) }}% — {{ report.rates.overhead_source }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+     Amount {% if report.overhead_amount is not none %}{{ format_money(report.overhead_amount) }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.</p>
+  <p>Profit {% if report.rates.profit_percent is not none %}{{ format_qty(report.rates.profit_percent) }}% — {{ report.rates.profit_source }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.
+     Amount {% if report.profit_amount is not none %}{{ format_money(report.profit_amount) }}{% else %}<span class="unfilled">{{ unfilled }}</span>{% endif %}.</p>
+  <p><b>Package total</b> {% if report.total is not none %}{{ format_money(report.total) }}{% else %}<span class="unfilled">{{ unfilled }}</span> — blocked{% endif %}.</p>
+  <form method="post" action="/estimator/{{report.project.id}}/report/pricing" class="line-form">
+    <label>Overhead %<input name="overhead_percent" value="{{ format_input(report.rates.overhead_percent) }}" placeholder="Unfilled"></label>
+    <label>Overhead source<input name="overhead_source" value="{{ report.rates.overhead_source }}" placeholder="Who set this rate and where it is written"></label>
+    <label>Profit %<input name="profit_percent" value="{{ format_input(report.rates.profit_percent) }}" placeholder="Unfilled"></label>
+    <label>Profit source<input name="profit_source" value="{{ report.rates.profit_source }}" placeholder="Who set this rate and where it is written"></label>
+    <button>Save overhead and profit</button>
+  </form>
+  <p class="muted">A blank percent is stored as unfilled, not as zero. Zero is saved only when you type 0 and a written source. Catalog sell prices are not used as this total.</p>
+</section>
+
+<section class="card">
+  <h2>Missing information</h2>
+  <ul>{% for item in report.missing %}<li>{{ item }}</li>{% else %}<li>None.</li>{% endfor %}</ul>
+</section>
+
+<section class="card">
+  <h2>Assumptions</h2>
+  <ul>{% for item in report.assumptions %}<li>{{ item }}</li>{% endfor %}</ul>
+</section>
+
+<section class="card" id="verification-checklist">
+  <h2>Human verification checklist</h2>
+  <ol>{% for item in report.checklist %}<li>{{ item }}</li>{% endfor %}</ol>
+</section>
+</div>
+{% endblock %}

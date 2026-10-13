@@ -3,10 +3,21 @@
 {% block heading %}{{p.title}}{% endblock %}
 {% block subheading %}INSOLIX Estimator • {{p.company or p.source_name or 'Project'}} • Due {{p.due_date or '—'}}{% endblock %}
 {% block content %}
-{% if request.query_params.get('analyzed') is not none %}<div class="notice success">AI scope scan created {{request.query_params.get('analyzed')}} new takeoff items. Quantities without explicit plan/spec evidence remain marked Needs Measurement.</div>{% endif %}
-{% if request.query_params.get('estimate_error') %}<div class="notice">No verified non-zero quantities are ready to send to an estimate yet.</div>{% endif %}
-{% if request.query_params.get('geometry_scanned') %}<div class="notice success">Blueprint geometry scan indexed {{request.query_params.get('geometry_scanned')}} plan pages. Open Blueprint Geometry Takeoff to measure/verify sheets.</div>{% endif %}
-{% if request.query_params.get('batch_uploaded') %}<div class="notice success">Bid package intake: {{request.query_params.get('batch_uploaded')}} files accepted, {{request.query_params.get('batch_skipped') or 0}} skipped, {{request.query_params.get('batch_pages') or 0}} PDF pages processed.</div>{% endif %}
+<div id="package-status" data-package-status="{{ p.package_status or 'Awaiting Documents' }}" data-workflow-status="{{ p.status or '' }}"></div>
+{% if request.query_params.get('analyzed') is not none and request.query_params.get('analyze_error') != '1' %}<div class="notice {% if request.query_params.get('analyzed')|int > 0 %}success{% endif %}">AI scope scan created {{request.query_params.get('analyzed')}} new takeoff items. Package status was not moved backward. Quantities are marked Explicit plan/spec text only when the quantity and scope term are in the same sentence, line, or table row.</div>{% endif %}
+{% if request.query_params.get('analyze_error') == '1' %}<div class="notice">Analysis did not finish. The package was not marked processed, and its status was left in place.</div>{% endif %}
+{% set err = request.query_params.get('estimate_error') %}
+{% if err == 'qa_required' %}<div class="notice">Estimate was not created. A QA pass is required before a draft estimate can be created.</div>{% endif %}
+{% if err == 'unreviewed' %}<div class="notice">Estimate was not created. {{ request.query_params.get('unreviewed_count') or 'One or more' }} takeoff row(s) are unreviewed. Review each quantity and mark it Reviewed before creating an estimate.</div>{% endif %}
+{% if err == 'unreviewed_and_qa' %}<div class="notice">Estimate was not created. {{ request.query_params.get('unreviewed_count') or 'One or more' }} takeoff row(s) are unreviewed, and a QA pass is required before a draft estimate can be created.</div>{% endif %}
+{% if err == 'ingest_errors' %}<div class="notice">Estimate was not created. The bid package still has ingest errors and cannot be treated as processed.</div>{% endif %}
+{% if err == 'no_verified_quantities' %}<div class="notice">Estimate was not created. No reviewed takeoff rows have a non-zero quantity.</div>{% endif %}
+{% if request.query_params.get('geometry_error') == '1' %}<div class="notice">Blueprint geometry scan did not finish. Stored files were kept, and the package was not marked processed.</div>{% endif %}
+{% if request.query_params.get('geometry_scanned')|int > 0 and request.query_params.get('geometry_error') != '1' %}<div class="notice success">Blueprint geometry scan indexed {{request.query_params.get('geometry_scanned')}} plan pages. Open Blueprint Geometry Takeoff to measure/verify sheets.</div>{% endif %}
+{% if request.query_params.get('batch_stored') is not none %}
+  {% set intake_problem = (request.query_params.get('batch_failed')|int > 0) or (request.query_params.get('analyze_error') == '1') or (request.query_params.get('geometry_error') == '1') or (p.package_status in ['Ingest Errors', 'Partially Received']) %}
+  <div id="intake-notice" data-intake-problem="{{ '1' if intake_problem else '0' }}" class="notice {% if not intake_problem %}success{% endif %}">Bid package intake: {{request.query_params.get('batch_stored')}} stored, {{request.query_params.get('batch_skipped') or 0}} skipped, {{request.query_params.get('batch_failed') or 0}} failed. Package status: {{ p.package_status or request.query_params.get('package_status') }}. {% if intake_problem %}Files that failed or were skipped are listed below and were not treated as processed.{% else %}Scope scan created {{request.query_params.get('analyzed') or 0}} takeoff items.{% endif %}</div>
+{% endif %}
 {% if p.document_access_note and docs|length==0 %}<div class="notice"><b>BuildingConnected document status:</b> {{p.document_access_note}}</div>{% endif %}
 
 <div class="grid2">
@@ -27,16 +38,40 @@
     <label>Revision / Addendum<input name="revision_label" value="Base Bid" placeholder="Base Bid or Addendum 3"></label></div>
     <button>Upload</button>
   </form></details>
-  {% for d in docs %}<div class="workorder"><div><b>{{d.filename}}</b><small>{{d.doc_type}} • {{d.revision_label}} • {{d.page_count}} pages</small></div></div>{% else %}<p class="muted">No bid documents uploaded yet.</p>{% endfor %}
+  {% for d in docs %}<div class="workorder"><div><b>{{d.filename}}</b>{% if d.superseded %} <span class="status">Superseded</span>{% endif %}<small>{{d.doc_type}} • {{d.revision_label}} • {{d.page_count or 0}} pages • {{d.text_chars or 0}} text chars • Discipline {{d.discipline or 'Unknown'}}{% if d.needs_ocr %} • Needs OCR / human review{% endif %} • v{{d.version_no or 1}}{% if d.supersedes_document_id %} • supersedes #{{d.supersedes_document_id}}{% endif %}<br>{{d.source_provider or '—'}} • {{d.source_ref or '—'}} • sha256 {{d.content_sha256 or '—'}} • {{d.file_size or 0}} bytes</small></div></div>{% else %}<p class="muted">No bid documents uploaded yet.</p>{% endfor %}
+  <h3>Package intake</h3>
+  <p class="muted">Every member of an upload is recorded as stored, skipped, or failed. A skipped or failed file keeps the package out of a processed status.</p>
+  {% for b in batches[:1] %}<p class="muted">Latest package summary: {{b.summary or '—'}} • {{b.source_provider or '—'}} • {{b.source_ref or '—'}}</p>{% if b.analysis_error %}<div class="notice">Analysis error: {{b.analysis_error}}</div>{% endif %}{% if b.geometry_error %}<div class="notice">Geometry error: {{b.geometry_error}}</div>{% endif %}{% endfor %}
+  <div class="table-wrap"><table>
+  <tr><th>File</th><th>Result</th><th>Reason</th><th>SHA-256</th><th>Size</th><th>Pages</th><th>Text chars</th><th>Discipline</th><th>OCR</th><th>Source</th></tr>
+  {% for f in ingest_files %}
+  <tr>
+    <td>{{f.filename}}</td>
+    <td>{{f.status}}</td>
+    <td>{{f.reason or '—'}}</td>
+    <td><small>{{f.content_sha256 or '—'}}</small></td>
+    <td>{{f.file_size if f.file_size is not none else '—'}}</td>
+    <td>{{f.page_count if f.page_count is not none else '—'}}</td>
+    <td>{{f.text_chars if f.text_chars is not none else '—'}}</td>
+    <td>{{f.discipline or '—'}}</td>
+    <td>{% if f.needs_ocr %}Needs OCR / human review{% else %}—{% endif %}</td>
+    <td><small>{{f.source_provider or '—'}}<br>{{f.source_ref or '—'}}</small></td>
+  </tr>
+  {% else %}<tr><td colspan="10" class="empty">No intake records yet.</td></tr>{% endfor %}
+  </table></div>
+  {% if ocr_pages %}<p><b>Pages needing OCR or human review:</b></p><ul>{% for pg in ocr_pages %}<li>{{pg.filename}} p.{{pg.page_no}} — {{pg.discipline or 'Unknown'}}</li>{% endfor %}</ul>{% endif %}
 </section>
 <section class="card">
   <h2>Estimator Controls</h2>
-  <p><b>Status:</b> {{p.status}}</p><p><b>Source:</b> {{p.source_name or 'Manual'}}</p>
+  <p><b>Package status:</b> {{p.package_status or 'Awaiting Documents'}}</p>
+  <p>{{p.package_summary or ''}}</p>
+  <p><b>Workflow:</b> {{p.status}}</p><p><b>Source:</b> {{p.source_name or 'Manual'}}</p>
   {% if p.source_url %}<p><a class="smallbtn" href="{{p.source_url}}" target="_blank" rel="noopener">Open Source Project</a></p>{% endif %}
+  <p><a class="smallbtn" href="/estimator/{{p.id}}/report">Estimate Report</a> <a class="smallbtn" href="/estimator/{{p.id}}/report.csv">CSV</a> <a class="smallbtn" href="/estimator/{{p.id}}/report.pdf">PDF</a></p>
   <p><a class="smallbtn" href="/estimator/{{p.id}}/geometry">Blueprint Geometry Takeoff</a></p>
   <form method="post" action="/estimator/{{p.id}}/geometry/scan" style="margin-bottom:10px"><button class="secondary">Scan Blueprint Geometry</button></form>
   <form method="post" action="/estimator/{{p.id}}/create-estimate"><button>Create INSOLIX Estimate from Verified Quantities</button></form>
-  <p class="muted">Only takeoff items with a non-zero verified quantity are transferred. Pricebook-linked items carry current INSOLIX costs and sell prices.</p>
+  <p class="muted">A draft estimate is created only after every positive quantity is Reviewed and QA has passed. Pricebook suggestions are not applied automatically.</p>
 </section>
 </div>
 
@@ -47,11 +82,11 @@
 <tr><th>Scope</th><th>Material / Requirement</th><th>Quantity</th><th>Evidence</th><th>Confidence</th><th>Review / Pricebook</th></tr>
 {% for i in rows %}
 <tr>
-<td><b>{{i.scope_type or i.assembly}}</b><br><small>{{i.location or ''}} {% if i.spec_section %}• Spec {{i.spec_section}}{% endif %}</small></td>
+<td><b>{{i.scope_type or i.assembly}}</b><br><small>{{i.location or ''}} {% if i.spec_section %}• Spec {{i.spec_section}}{% endif %}{% if i.source_filename %} • {{i.source_filename}}{% if i.source_page %} p.{{i.source_page}}{% endif %}{% endif %}{% if i.source_sheet %} • {{i.source_sheet}}{% endif %}</small></td>
 <td>{{i.material or '—'}} {% if i.r_value %}• {{i.r_value}}{% endif %} {% if i.facing %}• {{i.facing}}{% endif %}</td>
 <td><b>{{"%.1f"|format(i.qty or 0)}} {{i.unit}}</b><br><small>Gross {{i.gross_qty or 0}} - deductions {{i.deductions or 0}}</small></td>
 <td><small>{{(i.evidence or '')[:350]}}</small></td>
-<td><b>{{i.confidence}}%</b><br><small>{{i.measurement_source or 'Not measured'}}</small></td>
+<td><b>{{i.confidence}}%</b><br><small>{{i.measurement_source or 'Needs measurement'}}</small>{% if i.suggested_pricebook_name %}<br><small>Suggested, not applied: {{i.suggested_pricebook_name}}</small>{% endif %}</td>
 <td>
 <form method="post" action="/estimator/{{p.id}}/items/{{i.id}}/review">
 <input name="gross_qty" type="number" step="0.01" value="{{i.gross_qty or 0}}" placeholder="Gross qty">

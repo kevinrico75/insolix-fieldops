@@ -90,9 +90,7 @@ def init_estimator_db():
         for name,typ in [("source_ref","TEXT"),("source_provider","TEXT"),("source_url","TEXT")]:
             if name not in cols:
                 c.execute(f"ALTER TABLE estimator_documents ADD COLUMN {name} {typ}")
-        c.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_estimator_document_source
-                     ON estimator_documents(project_id,source_provider,source_ref)
-                     WHERE source_ref IS NOT NULL""")
+        package_ingest.migrate_estimator_schema(c)
         pcols={r["name"] for r in c.execute("PRAGMA table_info(estimator_projects)").fetchall()}
         for name,typ in [("document_access_status","TEXT"),("document_access_note","TEXT")]:
             if name not in pcols:
@@ -100,21 +98,9 @@ def init_estimator_db():
         c.commit()
     finally: c.close()
 
-SCOPE_RULES=[
- ("Insulation","Exterior Walls",["exterior wall","thermal insulation","07 21 00","07 21 16","batt insulation","wall insulation"]),
- ("Insulation","Attic / Roof",["attic insulation","roof insulation","ceiling insulation","roof thermal","loose-fill insulation","blown insulation"]),
- ("Insulation","Sound Walls / Partitions",["sound attenuation","acoustic batt","sound batt","sound insulation","stc","interior partition"]),
- ("Insulation","Midfloor / Floor-Ceiling",["floor ceiling","floor-ceiling","midfloor","between floors","floor insulation"]),
- ("Insulation","Crawlspace / Rim / Foundation",["crawlspace","crawl space","rim joist","band joist","foundation wall insulation"]),
- ("Spray Foam","Spray Foam",["spray polyurethane foam","spray foam","closed-cell","closed cell","open-cell","open cell","07 21 19"]),
- ("Firestop / Air Seal","Firestopping",["firestop","firestopping","07 84 00","penetration firestop"]),
- ("Firestop / Air Seal","Air Barrier / Air Seal",["air barrier","air sealing","07 27 00","air seal"]),
- ("Masonry","CMU",["concrete masonry","cmu","unit masonry","04 20 00","04 22 00","block wall"]),
- ("Masonry","Brick",["brick veneer","brick masonry","face brick","04 21"]),
- ("Natural Stone","Stone Veneer",["stone veneer","natural stone","manufactured stone","cultured stone","04 42 00"]),
- ("Stucco","3-Coat Stucco",["stucco","portland cement plaster","three coat plaster","3-coat","09 24 00"]),
- ("Stucco","EIFS",["eifs","exterior insulation and finish system","07 24 00"]),
-]
+import urllib.parse
+import package_ingest
+import estimate_report
 
 def _extract_pdf(data):
     reader=PdfReader(io.BytesIO(data))
@@ -144,25 +130,11 @@ def _download_document(url,max_bytes=80*1024*1024):
         return data
 
 def _store_estimator_document(project_id,filename,data,doc_type=None,revision_label="Base Bid",source_provider=None,source_ref=None,source_url=None):
-    safe=(filename or "document").replace("/","_").replace("\\","_")[:240]
-    stored=f"{project_id}_{uuid.uuid4().hex}_{safe}"
-    path=os.path.join(UPLOAD_ROOT,stored)
-    with open(path,"wb") as f:f.write(data)
-    text,pages=_extract_text(safe,data)
-    c=_conn()
-    try:
-        c.execute("""INSERT INTO estimator_documents(project_id,filename,stored_name,doc_type,revision_label,page_count,extracted_text,
-                     source_ref,source_provider,source_url) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                  (project_id,safe,stored,doc_type or _bc_doc_type(safe),revision_label,pages,text,
-                   source_ref,source_provider,source_url))
-        did=c.execute("SELECT last_insert_rowid() id").fetchone()["id"]
-        if (revision_label or "").lower() not in ("base bid","original",""):
-            c.execute("INSERT INTO estimator_addenda(project_id,label,summary) VALUES(?,?,?)",
-                      (project_id,revision_label,f"Uploaded {safe}; pending impact analysis."))
-        c.execute("UPDATE estimator_projects SET status='Documents Received',updated_at=CURRENT_TIMESTAMP WHERE id=?",(project_id,))
-        c.commit()
-        return did,pages
-    finally:c.close()
+    result=package_ingest.ingest_member(project_id,filename,data,doc_type=doc_type,revision_label=revision_label,
+                                        source_provider=source_provider,source_ref=source_ref,source_url=source_url)
+    if result["status"]!="stored":
+        raise RuntimeError(result["reason"] or result["status"])
+    return result["document_id"], result["page_count"]
 
 def _extract_text(filename,data):
     low=filename.lower()
@@ -173,86 +145,21 @@ def _extract_text(filename,data):
     except Exception:
         return "",0
 
-def _first_match(text,patterns):
-    low=text.lower()
-    return next((p for p in patterns if p in low),None)
-
-def _section_for(text,scope):
-    patterns={
-      "Insulation":[r"07\s*21\s*\d*",r"0721\d*"],
-      "Spray Foam":[r"07\s*21\s*19"],
-      "Firestop / Air Seal":[r"07\s*84\s*00",r"07\s*27\s*00"],
-      "Masonry":[r"04\s*2\d\s*\d*",r"042\d\d*"],
-      "Natural Stone":[r"04\s*42\s*00"],
-      "Stucco":[r"09\s*24\s*00",r"07\s*24\s*00"]
-    }
-    for p in patterns.get(scope,[]):
-        m=re.search(p,text,re.I)
-        if m: return re.sub(r"\s+"," ",m.group(0)).strip()
-    return ""
-
-def _material_details(snippet):
-    rv=""
-    m=re.search(r"\bR\s*[- ]?\s*(\d{1,2})\b",snippet,re.I)
-    if m: rv="R-"+m.group(1)
-    facing=""
-    for token,label in [("kraft","Kraft Faced"),("foil","Foil Faced"),("unfaced","Unfaced"),("fsk","FSK")]:
-        if token in snippet.lower(): facing=label; break
-    mat=""
-    for token,label in [("mineral wool","Mineral Wool"),("fiberglass","Fiberglass"),("spray polyurethane","Spray Polyurethane Foam"),("spray foam","Spray Foam"),("cmu","CMU"),("concrete masonry","CMU"),("brick","Brick"),("stone veneer","Stone Veneer"),("stucco","Stucco"),("eifs","EIFS")]:
-        if token in snippet.lower(): mat=label; break
-    return mat,rv,facing
-
-def _explicit_qty(snippet):
-    pats=[
-      r"(?P<qty>\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(?:SF|SQ\.?\s*FT\.?|SQUARE\s+FEET)",
-      r"(?P<qty>\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(?:LF|LIN\.?\s*FT\.?)"
-    ]
-    for p in pats:
-        m=re.search(p,snippet,re.I)
-        if m:
-            unit="LF" if re.search(r"LF|LIN",m.group(0),re.I) else "SF"
-            return float(m.group("qty").replace(",","")),unit,m.group(0)
-    return 0.0,"SF",""
-
 def analyze_project(project_id):
-    c=_conn()
-    created=0
-    try:
-        docs=c.execute("SELECT * FROM estimator_documents WHERE project_id=? ORDER BY id",(project_id,)).fetchall()
-        corpus="\n".join((d["extracted_text"] or "") for d in docs)
-        if not corpus.strip(): return 0
-        low=corpus.lower()
-        for trade,scope,terms in SCOPE_RULES:
-            hit=_first_match(corpus,terms)
-            if not hit: continue
-            pos=low.find(hit.lower())
-            start=max(0,pos-600); end=min(len(corpus),pos+1200)
-            snippet=re.sub(r"\s+"," ",corpus[start:end]).strip()
-            mat,rv,facing=_material_details(snippet)
-            qty,unit,qty_evidence=_explicit_qty(snippet)
-            section=_section_for(snippet,trade)
-            confidence=min(96,62 + (10 if section else 0) + (8 if mat else 0) + (8 if rv else 0) + (8 if qty>0 else 0))
-            status="Quantity Extracted - Verify" if qty>0 else "Scope Found - Needs Measurement"
-            existing=c.execute("""SELECT id FROM estimator_takeoff_items WHERE project_id=? AND trade=? AND scope_type=? AND COALESCE(spec_section,'')=COALESCE(?, '') LIMIT 1""",
-                               (project_id,trade,scope,section)).fetchone()
-            if existing: continue
-            evidence=(hit + ("; "+qty_evidence if qty_evidence else "") + "; "+snippet[:700])[:1200]
-            c.execute("""INSERT INTO estimator_takeoff_items(
-                project_id,trade,scope_type,assembly,material,r_value,facing,gross_qty,deductions,qty,unit,
-                spec_section,evidence,confidence,review_status,measurement_source,notes)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-              (project_id,trade,scope,scope,mat,rv,facing,qty,0,qty,unit,section,evidence,confidence,status,
-               "Explicit plan/spec text" if qty>0 else "Not measured","AI scope detection; human verification required."))
-            created+=1
-        c.execute("UPDATE estimator_projects SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                  ("Takeoff Review" if created else "Document Review",project_id))
-        c.commit()
-        return created
-    finally: c.close()
+    return package_ingest.analyze_project(project_id)
+
+def _poke_estimator_queue(project_id):
+    from agent_feature import note_new_project_documents
+    note_new_project_documents(project_id)
 
 def install(app):
     init_estimator_db()
+    c=_conn()
+    try:
+        estimate_report.migrate_report_schema(c)
+    finally:
+        c.close()
+    estimate_report.install_routes(app, templates)
 
     @app.get("/estimator",response_class=HTMLResponse)
     def estimator_home(request:Request):
@@ -290,14 +197,23 @@ def install(app):
         try:
             p=c.execute("SELECT * FROM estimator_projects WHERE id=?",(project_id,)).fetchone()
             if not p:return RedirectResponse("/estimator",303)
+            package_ingest.refresh_package_status(c, project_id)
+            c.commit()
+            p=c.execute("SELECT * FROM estimator_projects WHERE id=?",(project_id,)).fetchone()
             docs=c.execute("SELECT * FROM estimator_documents WHERE project_id=? ORDER BY id DESC",(project_id,)).fetchall()
             items=c.execute("SELECT * FROM estimator_takeoff_items WHERE project_id=? ORDER BY trade,scope_type,id",(project_id,)).fetchall()
             grouped={}
             for r in items: grouped.setdefault(r["trade"],[]).append(r)
             pb=c.execute("SELECT id,trade,name,unit,r_value,facing,size,manufacturer FROM pricebook WHERE active=1 ORDER BY trade,name LIMIT 1000").fetchall()
             addenda=c.execute("SELECT * FROM estimator_addenda WHERE project_id=? ORDER BY id DESC",(project_id,)).fetchall()
+            ingest_files=c.execute("SELECT * FROM estimator_ingest_files WHERE project_id=? ORDER BY id",(project_id,)).fetchall()
+            batches=c.execute("SELECT * FROM estimator_ingest_batches WHERE project_id=? ORDER BY created_at DESC, rowid DESC",(project_id,)).fetchall()
+            ocr_pages=c.execute("""SELECT p.*, d.filename FROM estimator_document_pages p
+                                  JOIN estimator_documents d ON d.id=p.document_id
+                                  WHERE p.project_id=? AND p.needs_ocr=1 AND COALESCE(d.superseded,0)=0
+                                  ORDER BY d.id, p.page_no""",(project_id,)).fetchall()
         finally:c.close()
-        return templates.TemplateResponse("estimator_project.html",{"request":request,"p":p,"docs":docs,"items":items,"grouped":grouped,"pricebook":pb,"addenda":addenda})
+        return templates.TemplateResponse("estimator_project.html",{"request":request,"p":p,"docs":docs,"items":items,"grouped":grouped,"pricebook":pb,"addenda":addenda,"ingest_files":ingest_files,"batches":batches,"ocr_pages":ocr_pages})
 
     @app.post("/api/buildingconnected/document")
     async def buildingconnected_document_api(request:Request, x_insolix_ingest_token:str=Header(default="")):
@@ -322,10 +238,6 @@ def install(app):
                          ON CONFLICT(opportunity_id) DO UPDATE SET updated_at=CURRENT_TIMESTAMP""",
                       (o["id"],o["title"],o["source_name"],o["url"],o["agency"],o["location"],o["due_date"]))
             p=c.execute("SELECT id FROM estimator_projects WHERE opportunity_id=?",(o["id"],)).fetchone()
-            existing=c.execute("""SELECT id,filename FROM estimator_documents WHERE project_id=? AND source_provider='BuildingConnected'
-                                  AND source_ref=?""",(p["id"],source_ref)).fetchone()
-            if existing:
-                return {"ok":True,"duplicate":True,"document_id":existing["id"],"project_id":p["id"]}
         finally:c.close()
 
         try:
@@ -334,89 +246,106 @@ def install(app):
         except Exception as e:
             raise HTTPException(status_code=502,detail=("document download/extract failed: "+str(e))[:500])
 
-        stored=f"{p['id']}_{uuid.uuid4().hex}_{filename}"
-        path=os.path.join(UPLOAD_ROOT,stored)
-        with open(path,"wb") as fh: fh.write(data)
-        c=_conn()
+        result=package_ingest.ingest_member(
+            p["id"], filename, data, revision_label=payload.get("revision_label") or "Base Bid",
+            source_provider="BuildingConnected", source_ref=source_ref,
+            source_url=payload.get("source_web_url") or "", match_source_ref=True)
+        if result["status"]=="skipped" and result["duplicate"]:
+            return {"ok":True,"duplicate":True,"document_id":result["document_id"],"project_id":p["id"],
+                    "sha256":result["sha256"],"reason":result["reason"]}
+        if result["status"]!="stored":
+            raise HTTPException(status_code=422, detail=(result["reason"] or result["status"])[:500])
+        analyze_error=""
+        created=0
         try:
-            c.execute("""INSERT INTO estimator_documents(project_id,filename,stored_name,doc_type,revision_label,page_count,extracted_text,
-                         source_ref,source_provider,source_url)
-                         VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                      (p["id"],filename,stored,_bc_doc_type(filename),payload.get("revision_label") or "Base Bid",pages,text,
-                       source_ref,"BuildingConnected",payload.get("source_web_url") or ""))
-            did=c.execute("SELECT last_insert_rowid() id").fetchone()["id"]
-            c.execute("UPDATE estimator_projects SET status='Documents Received',updated_at=CURRENT_TIMESTAMP WHERE id=?",(p["id"],))
-            c.commit()
-            return {"ok":True,"duplicate":False,"document_id":did,"project_id":p["id"],"pages":pages,"bytes":len(data)}
-        finally:c.close()
+            created=analyze_project(p["id"])
+        except Exception as e:
+            analyze_error=f"{type(e).__name__}: {e}"[:500]
+        geom_pages=0
+        geom_error=""
+        try:
+            from geometry_feature import scan_project
+            geom_pages=scan_project(p["id"]) or 0
+        except Exception as e:
+            geom_error=f"{type(e).__name__}: {e}"[:500]
+        _poke_estimator_queue(p["id"])
+        return {"ok":True,"duplicate":False,"document_id":result["document_id"],"project_id":p["id"],
+                "pages":result["page_count"],"bytes":len(data),"sha256":result["sha256"],
+                "version_no":result["version_no"],"supersedes_document_id":result["supersedes_document_id"],
+                "analyzed":created,"analyze_error":analyze_error,"geometry_pages":geom_pages,
+                "geometry_error":geom_error,"package_status":package_ingest.refresh_only(p["id"]),
+                "text_chars":len(text or ""),"extracted_pages":pages}
 
     @app.post("/estimator/{project_id}/documents")
-    async def estimator_upload(project_id:int,file:UploadFile=File(...),doc_type:str=Form("Plans"),revision_label:str=Form("Base Bid")):
+    async def estimator_upload(project_id:int, request:Request, file:UploadFile=File(...), doc_type:str=Form("Plans"), revision_label:str=Form("Base Bid")):
         data=await file.read()
-        safe=(file.filename or "document").replace("/","_").replace("\\","_")
-        stored=f"{project_id}_{uuid.uuid4().hex}_{safe}"
-        path=os.path.join(UPLOAD_ROOT,stored)
-        with open(path,"wb") as f:f.write(data)
-        text,pages=_extract_text(safe,data)
-        c=_conn()
-        try:
-            c.execute("""INSERT INTO estimator_documents(project_id,filename,stored_name,doc_type,revision_label,page_count,extracted_text)
-                         VALUES(?,?,?,?,?,?,?)""",(project_id,safe,stored,doc_type,revision_label,pages,text))
-            if revision_label.lower() not in ("base bid","original",""):
-                c.execute("INSERT INTO estimator_addenda(project_id,label,summary) VALUES(?,?,?)",
-                          (project_id,revision_label,f"Uploaded {safe}; pending impact analysis."))
-            c.commit()
-        finally:c.close()
-        return RedirectResponse(f"/estimator/{project_id}",303)
+        provider, source_ref = package_ingest.manual_source(package_ingest.actor_from_request(request))
+        result=package_ingest.ingest_member(project_id, file.filename or "document", data, doc_type=doc_type,
+                                            revision_label=revision_label, source_provider=provider, source_ref=source_ref)
+        if result["status"]=="stored":
+            _poke_estimator_queue(project_id)
+        status=package_ingest.refresh_only(project_id)
+        q=urllib.parse.urlencode({"upload_status":result["status"],"package_status":status})
+        return RedirectResponse(f"/estimator/{project_id}?{q}",303)
 
     @app.post("/estimator/{project_id}/documents/batch")
-    async def estimator_batch_upload(project_id:int,files:list[UploadFile]=File(...),revision_label:str=Form("Base Bid")):
-        allowed=(".pdf",".txt",".rtf",".doc",".docx",".xls",".xlsx",".dwg",".dxf")
-        accepted=0; skipped=0; pages=0
+    async def estimator_batch_upload(project_id:int, request:Request, files:list[UploadFile]=File(...),
+                                    revision_label:str=Form("Base Bid"), package_origin:str=Form("")):
+        actor=package_ingest.actor_from_request(request)
+        stored=skipped=failed=pages=0
+        batch_ids=[]
         for up in files[:100]:
             name=up.filename or "document"
             data=await up.read()
             if name.lower().endswith(".zip"):
-                try:
-                    z=zipfile.ZipFile(io.BytesIO(data))
-                    total_uncompressed=0
-                    for zi in z.infolist()[:500]:
-                        if zi.is_dir(): continue
-                        inner=os.path.basename(zi.filename)
-                        if not inner or not inner.lower().endswith(allowed): continue
-                        if zi.file_size>80*1024*1024: skipped+=1; continue
-                        total_uncompressed+=zi.file_size
-                        if total_uncompressed>500*1024*1024: break
-                        raw=z.read(zi)
-                        try:
-                            _,pg=_store_estimator_document(project_id,inner,raw,revision_label=revision_label)
-                            accepted+=1; pages+=pg
-                        except Exception:
-                            skipped+=1
-                except Exception:
-                    skipped+=1
-            elif name.lower().endswith(allowed):
-                try:
-                    _,pg=_store_estimator_document(project_id,name,data,revision_label=revision_label)
-                    accepted+=1; pages+=pg
-                except Exception:
-                    skipped+=1
+                provider, source_ref = package_ingest.classify_batch_source(name, actor, package_origin)
+                summary=package_ingest.ingest_zip_bytes(project_id, name, data, revision_label=revision_label,
+                                                        source_provider=provider, source_ref=source_ref)
             else:
-                skipped+=1
-        created=0; geom_pages=0
-        if accepted:
+                provider, source_ref = package_ingest.manual_source(actor)
+                summary=package_ingest.ingest_loose_files(project_id, [{"filename":name,"data":data}],
+                                                          revision_label=revision_label, source_provider=provider,
+                                                          source_ref=source_ref)
+            stored+=summary["stored"]; skipped+=summary["skipped"]; failed+=summary["failed"]; pages+=summary["pages"]
+            batch_ids.append(summary["batch_id"])
+        if len(files)>100:
+            skipped += len(files)-100
+        created=0
+        analyze_error=""
+        geom_pages=0
+        geom_error=""
+        if stored:
             try:
                 created=analyze_project(project_id)
+            except Exception as e:
+                analyze_error=f"{type(e).__name__}: {e}"[:500]
+            try:
                 from geometry_feature import scan_project
-                geom_pages=scan_project(project_id)
-            except Exception:
-                pass
-        return RedirectResponse(f"/estimator/{project_id}?batch_uploaded={accepted}&batch_skipped={skipped}&batch_pages={pages}&analyzed={created}&geometry_scanned={geom_pages}",303)
+                geom_pages=scan_project(project_id) or 0
+            except Exception as e:
+                geom_error=f"{type(e).__name__}: {e}"[:500]
+            for batch_id in batch_ids:
+                package_ingest.note_batch_errors(batch_id, analyze_error, geom_error)
+            _poke_estimator_queue(project_id)
+        status=package_ingest.refresh_only(project_id)
+        q=urllib.parse.urlencode({
+            "batch_stored":stored,"batch_skipped":skipped,"batch_failed":failed,"batch_pages":pages,
+            "analyzed":created,"geometry_scanned":geom_pages,
+            "analyze_error":1 if analyze_error else 0,"geometry_error":1 if geom_error else 0,
+            "package_status":status,
+        })
+        return RedirectResponse(f"/estimator/{project_id}?{q}",303)
 
     @app.post("/estimator/{project_id}/analyze")
     def estimator_analyze(project_id:int):
-        n=analyze_project(project_id)
-        return RedirectResponse(f"/estimator/{project_id}?analyzed={n}",303)
+        analyze_error=""
+        try:
+            n=analyze_project(project_id)
+        except Exception as e:
+            n=0
+            analyze_error=f"{type(e).__name__}: {e}"[:500]
+            package_ingest.refresh_only(project_id)
+        return RedirectResponse(f"/estimator/{project_id}?analyzed={n}&analyze_error={1 if analyze_error else 0}",303)
 
     @app.post("/estimator/{project_id}/items")
     def estimator_add_item(project_id:int,trade:str=Form(...),scope_type:str=Form(""),assembly:str=Form(""),
@@ -449,6 +378,7 @@ def install(app):
             c.execute("""UPDATE estimator_takeoff_items SET gross_qty=?,deductions=?,qty=?,source_sheet=?,measurement_source=?,
                          pricebook_id=?,review_status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?""",
                       (gross_qty,deductions,qty,source_sheet,measurement_source,pb,review_status,item_id,project_id))
+            package_ingest.refresh_package_status(c, project_id)
             c.commit()
         finally:c.close()
         return RedirectResponse(f"/estimator/{project_id}",303)
@@ -459,8 +389,20 @@ def install(app):
         try:
             p=c.execute("SELECT * FROM estimator_projects WHERE id=?",(project_id,)).fetchone()
             if not p:return RedirectResponse("/estimator",303)
+            if package_ingest.unresolved_ingest_failures(c, project_id):
+                return RedirectResponse(f"/estimator/{project_id}?estimate_error=ingest_errors",303)
             items=c.execute("SELECT * FROM estimator_takeoff_items WHERE project_id=? AND qty>0 ORDER BY trade,scope_type,id",(project_id,)).fetchall()
-            if not items:return RedirectResponse(f"/estimator/{project_id}?estimate_error=no_verified_quantities",303)
+            if not items:
+                return RedirectResponse(f"/estimator/{project_id}?estimate_error=no_verified_quantities",303)
+            unreviewed=[i for i in items if (i["review_status"] or "").strip()!="Reviewed"]
+            qa=c.execute("""SELECT id FROM estimator_qa_reviews WHERE project_id=? AND status LIKE 'PASS%'
+                            ORDER BY id DESC LIMIT 1""",(project_id,)).fetchone()
+            if unreviewed and not qa:
+                return RedirectResponse(f"/estimator/{project_id}?estimate_error=unreviewed_and_qa&unreviewed_count={len(unreviewed)}",303)
+            if unreviewed:
+                return RedirectResponse(f"/estimator/{project_id}?estimate_error=unreviewed&unreviewed_count={len(unreviewed)}",303)
+            if not qa:
+                return RedirectResponse(f"/estimator/{project_id}?estimate_error=qa_required",303)
             customer=None
             if p["company"]:
                 customer=c.execute("SELECT id FROM customers WHERE company=? ORDER BY id LIMIT 1",(p["company"],)).fetchone()
